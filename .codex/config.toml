@@ -1,0 +1,6 @@
+# Use OpenAI Codex through the user's ChatGPT subscription.
+# The model is intentionally omitted so Codex selects the latest available default.
+model_provider = "openai"
+forced_login_method = "chatgpt"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"

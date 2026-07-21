@@ -1,0 +1,24 @@
+# Codex authentication is stored in the user profile, never in this repository.
+.codex/auth.json
+.codex/history.jsonl
+.codex/log/
+
+# Secrets / environment
+.env
+backend/.env
+frontend/.env.local
+
+# Python
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+
+# Uploaded user data (screenshots, photos) - added in a later phase
+backend/uploads/
+
