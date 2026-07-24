@@ -12,31 +12,58 @@ async def list_exposure_groups(db: AsyncSession) -> list[ExposureGroup]:
     return list(result.scalars().all())
 
 
-async def create_exposure_group(db: AsyncSession, data: ExposureGroupCreate) -> ExposureGroup:
-    group = ExposureGroup(**data.model_dump())
+async def create_exposure_group(
+    db: AsyncSession,
+    data: ExposureGroupCreate,
+    *,
+    record_id: uuid.UUID | None = None,
+    commit: bool = True,
+) -> ExposureGroup:
+    values = data.model_dump()
+    if record_id is not None:
+        values["id"] = record_id
+    group = ExposureGroup(**values)
     db.add(group)
-    await db.commit()
-    await db.refresh(group)
+    if commit:
+        await db.commit()
+        await db.refresh(group)
+    else:
+        await db.flush()
     return group
 
 
 async def update_exposure_group(
-    db: AsyncSession, group_id: uuid.UUID, data: ExposureGroupUpdate
+    db: AsyncSession,
+    group_id: uuid.UUID,
+    data: ExposureGroupUpdate,
+    *,
+    commit: bool = True,
 ) -> ExposureGroup | None:
     group = await db.get(ExposureGroup, group_id)
     if group is None:
         return None
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(group, field, value)
-    await db.commit()
-    await db.refresh(group)
+    if commit:
+        await db.commit()
+        await db.refresh(group)
+    else:
+        await db.flush()
     return group
 
 
-async def delete_exposure_group(db: AsyncSession, group_id: uuid.UUID) -> bool:
+async def delete_exposure_group(
+    db: AsyncSession,
+    group_id: uuid.UUID,
+    *,
+    commit: bool = True,
+) -> bool:
     group = await db.get(ExposureGroup, group_id)
     if group is None:
         return False
     await db.delete(group)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return True

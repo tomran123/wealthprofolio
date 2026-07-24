@@ -9,7 +9,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U wealthportfolio"]
       interval: 5s
@@ -20,24 +20,60 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://wealthportfolio:${POSTGRES_PASSWORD:-wealthportfolio}@postgres:5432/wealthportfolio
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     ports:
       - "127.0.0.1:8000:8000"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        BACKEND_INTERNAL_URL: http://backend:8000
     restart: unless-stopped
     environment:
       BACKEND_INTERNAL_URL: http://backend:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: wealthportfolio
+      PGPASSWORD: ${POSTGRES_PASSWORD:-wealthportfolio}
+      PGDATABASE: wealthportfolio
+    volumes:
+      - ./backups:/backups
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        while true; do
+          stamp=$$(date -u +%Y%m%d_%H%M%S)
+          pg_dump --clean --if-exists --no-owner --no-privileges > "/backups/backup_$${stamp}.sql.tmp"
+          mv "/backups/backup_$${stamp}.sql.tmp" "/backups/backup_$${stamp}.sql"
+          find /backups -type f -name 'backup_*.sql' -mtime +30 -delete
+          sleep 86400
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:

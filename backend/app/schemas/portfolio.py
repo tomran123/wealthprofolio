@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class HoldingDetail(BaseModel):
@@ -33,6 +33,8 @@ class AggregateResponse(BaseModel):
     base_currency: str
     total_value: Decimal
     groups: list[AggregateGroup]
+    total_liabilities: Decimal
+    liability_groups: list[AggregateGroup]
     generated_at: str
 
 
@@ -45,3 +47,34 @@ class PortfolioSummary(BaseModel):
     holdings_count: int
     missing_price_count: int
     missing_fx_count: int
+
+
+class RefreshResultRead(BaseModel):
+    success_count: int
+    kept_count: int
+    failed_count: int
+    failed_symbols: list[str]
+    errors: list[dict[str, str]] = []
+    fx_error: str | None = None
+    refreshed_at: str
+    snapshot_id: str
+
+
+class ValuationSnapshotRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: str
+    base_currency: str
+    total_assets: Decimal
+    total_liabilities: Decimal
+    net_worth: Decimal
+    allocation_json: dict
+    refresh_result_json: dict
+
+
+class ValuationSnapshotPage(BaseModel):
+    items: list[ValuationSnapshotRead]
+    total: int
+    offset: int
+    limit: int

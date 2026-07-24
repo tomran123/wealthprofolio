@@ -1,6 +1,6 @@
 "use client";
 
-import { Database, LandmarkIcon, LayoutDashboard, LineChart, LogOut } from "lucide-react";
+import { Bot, Database, LandmarkIcon, LayoutDashboard, LineChart, LogOut, ReceiptText } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -13,6 +13,8 @@ const NAV_ITEMS = [
   { href: "/dashboard", key: "nav.dashboard", icon: LayoutDashboard },
   { href: "/assets", key: "nav.assets", icon: LineChart },
   { href: "/accounts", key: "nav.accounts", icon: LandmarkIcon },
+  { href: "/transactions", key: "nav.transactions", icon: ReceiptText },
+  { href: "/agent", key: "nav.agent", icon: Bot },
   { href: "/data", key: "nav.data", icon: Database },
 ] as const;
 

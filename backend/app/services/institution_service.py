@@ -22,31 +22,58 @@ async def get_institution(db: AsyncSession, institution_id: uuid.UUID) -> Instit
     return await db.get(Institution, institution_id)
 
 
-async def create_institution(db: AsyncSession, data: InstitutionCreate) -> Institution:
-    institution = Institution(**data.model_dump())
+async def create_institution(
+    db: AsyncSession,
+    data: InstitutionCreate,
+    *,
+    record_id: uuid.UUID | None = None,
+    commit: bool = True,
+) -> Institution:
+    values = data.model_dump()
+    if record_id is not None:
+        values["id"] = record_id
+    institution = Institution(**values)
     db.add(institution)
-    await db.commit()
-    await db.refresh(institution)
+    if commit:
+        await db.commit()
+        await db.refresh(institution)
+    else:
+        await db.flush()
     return institution
 
 
 async def update_institution(
-    db: AsyncSession, institution_id: uuid.UUID, data: InstitutionUpdate
+    db: AsyncSession,
+    institution_id: uuid.UUID,
+    data: InstitutionUpdate,
+    *,
+    commit: bool = True,
 ) -> Institution | None:
     institution = await db.get(Institution, institution_id)
     if institution is None:
         return None
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(institution, field, value)
-    await db.commit()
-    await db.refresh(institution)
+    if commit:
+        await db.commit()
+        await db.refresh(institution)
+    else:
+        await db.flush()
     return institution
 
 
-async def delete_institution(db: AsyncSession, institution_id: uuid.UUID) -> bool:
+async def delete_institution(
+    db: AsyncSession,
+    institution_id: uuid.UUID,
+    *,
+    commit: bool = True,
+) -> bool:
     institution = await db.get(Institution, institution_id)
     if institution is None:
         return False
     await db.delete(institution)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return True

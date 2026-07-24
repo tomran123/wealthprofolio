@@ -30,31 +30,58 @@ async def get_instrument(db: AsyncSession, instrument_id: uuid.UUID) -> Instrume
     return await db.get(Instrument, instrument_id)
 
 
-async def create_instrument(db: AsyncSession, data: InstrumentCreate) -> Instrument:
-    instrument = Instrument(**data.model_dump())
+async def create_instrument(
+    db: AsyncSession,
+    data: InstrumentCreate,
+    *,
+    record_id: uuid.UUID | None = None,
+    commit: bool = True,
+) -> Instrument:
+    values = data.model_dump()
+    if record_id is not None:
+        values["id"] = record_id
+    instrument = Instrument(**values)
     db.add(instrument)
-    await db.commit()
-    await db.refresh(instrument)
+    if commit:
+        await db.commit()
+        await db.refresh(instrument)
+    else:
+        await db.flush()
     return instrument
 
 
 async def update_instrument(
-    db: AsyncSession, instrument_id: uuid.UUID, data: InstrumentUpdate
+    db: AsyncSession,
+    instrument_id: uuid.UUID,
+    data: InstrumentUpdate,
+    *,
+    commit: bool = True,
 ) -> Instrument | None:
     instrument = await db.get(Instrument, instrument_id)
     if instrument is None:
         return None
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(instrument, field, value)
-    await db.commit()
-    await db.refresh(instrument)
+    if commit:
+        await db.commit()
+        await db.refresh(instrument)
+    else:
+        await db.flush()
     return instrument
 
 
-async def delete_instrument(db: AsyncSession, instrument_id: uuid.UUID) -> bool:
+async def delete_instrument(
+    db: AsyncSession,
+    instrument_id: uuid.UUID,
+    *,
+    commit: bool = True,
+) -> bool:
     instrument = await db.get(Instrument, instrument_id)
     if instrument is None:
         return False
     await db.delete(instrument)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return True

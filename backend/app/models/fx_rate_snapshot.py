@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Numeric, String
+from sqlalchemy import DateTime, Index, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, UUIDPrimaryKeyMixin
@@ -11,6 +11,15 @@ class FXRateSnapshot(UUIDPrimaryKeyMixin, Base):
     """An immutable point-in-time exchange rate observation: 1 base_currency = rate quote_currency."""
 
     __tablename__ = "fx_rate_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_fx_rate_snapshots_pair_as_of",
+            "base_currency",
+            "quote_currency",
+            "as_of",
+            "fetched_at",
+        ),
+    )
 
     base_currency: Mapped[str] = mapped_column(String(3), nullable=False, index=True)
     quote_currency: Mapped[str] = mapped_column(String(3), nullable=False, index=True)

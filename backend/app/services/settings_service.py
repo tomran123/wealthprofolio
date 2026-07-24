@@ -10,15 +10,24 @@ async def get_setting(db: AsyncSession, key: str, default: str | None = None) ->
     return setting.value if setting is not None else default
 
 
-async def set_setting(db: AsyncSession, key: str, value: str) -> AppSetting:
+async def set_setting(
+    db: AsyncSession,
+    key: str,
+    value: str,
+    *,
+    commit: bool = True,
+) -> AppSetting:
     setting = await db.get(AppSetting, key)
     if setting is None:
         setting = AppSetting(key=key, value=value)
         db.add(setting)
     else:
         setting.value = value
-    await db.commit()
-    await db.refresh(setting)
+    if commit:
+        await db.commit()
+        await db.refresh(setting)
+    else:
+        await db.flush()
     return setting
 
 

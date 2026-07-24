@@ -5,6 +5,8 @@
 
 # Secrets / environment
 .env
+backups/*.sql
+backups/*.sql.tmp
 backend/.env
 frontend/.env.local
 
@@ -21,4 +23,3 @@ frontend/next-env.d.ts
 
 # Uploaded user data (screenshots, photos) - added in a later phase
 backend/uploads/
-

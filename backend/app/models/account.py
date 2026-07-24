@@ -33,3 +33,4 @@ class Account(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     holdings: Mapped[list["Holding"]] = relationship(
         "Holding", back_populates="account", cascade="all, delete-orphan"
     )
+    transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="account")

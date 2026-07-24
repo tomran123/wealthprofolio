@@ -40,3 +40,4 @@ class Instrument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     exposure_group: Mapped["ExposureGroup | None"] = relationship("ExposureGroup", back_populates="instruments")
     holdings: Mapped[list["Holding"]] = relationship("Holding", back_populates="instrument")
+    transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="instrument")

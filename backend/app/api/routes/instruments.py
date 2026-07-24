@@ -9,9 +9,10 @@ from app.schemas.instrument import (
     InstrumentRead,
     InstrumentUpdate,
     ManualValuationCreate,
+    MarketInstrumentSearchResponse,
     PriceSnapshotRead,
 )
-from app.services import instrument_service, valuation_service
+from app.services import instrument_service, market_instrument_service, valuation_service
 
 router = APIRouter(prefix="/api/instruments", tags=["instruments"], dependencies=[Depends(get_current_user)])
 
@@ -21,6 +22,14 @@ async def list_instruments(q: str | None = Query(default=None), db: AsyncSession
     if q:
         return await instrument_service.search_instruments(db, q)
     return await instrument_service.list_instruments(db)
+
+
+@router.get("/market-search", response_model=MarketInstrumentSearchResponse)
+async def search_market_instruments(
+    q: str = Query(min_length=1, max_length=80),
+    db: AsyncSession = Depends(get_db),
+):
+    return await market_instrument_service.search_market_instruments(db, q)
 
 
 @router.get("/{instrument_id}", response_model=InstrumentRead)

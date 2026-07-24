@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     accounts,
+    agent,
     auth,
     data_management,
     exposure_groups,
@@ -9,13 +10,16 @@ from app.api.routes import (
     holdings,
     institutions,
     instruments,
+    llm_providers,
     owners,
     portfolio,
     settings,
+    transactions,
 )
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(agent.router)
 api_router.include_router(owners.router)
 api_router.include_router(institutions.router)
 api_router.include_router(exposure_groups.router)
@@ -26,3 +30,5 @@ api_router.include_router(fx_rates.router)
 api_router.include_router(portfolio.router)
 api_router.include_router(settings.router)
 api_router.include_router(data_management.router)
+api_router.include_router(transactions.router)
+api_router.include_router(llm_providers.router)

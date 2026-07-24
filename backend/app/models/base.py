@@ -15,6 +15,11 @@ class UUIDPrimaryKeyMixin:
 
 
 class TimestampMixin:
+    # Async ORM callers serialize rows immediately after commit=False flushes.
+    # Fetch server-generated onupdate values in the UPDATE itself so attribute
+    # access never attempts implicit async IO (which raises MissingGreenlet).
+    __mapper_args__ = {"eager_defaults": True}
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

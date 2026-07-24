@@ -31,6 +31,8 @@ async def set_holding_snapshot(
     instrument_id: uuid.UUID,
     quantity: Decimal,
     source: HoldingSource = HoldingSource.MANUAL,
+    *,
+    commit: bool = True,
 ) -> Holding:
     holding = await get_holding(db, account_id, instrument_id)
     if holding is None:
@@ -39,8 +41,11 @@ async def set_holding_snapshot(
     else:
         holding.quantity = quantity
         holding.source = source
-    await db.commit()
-    await db.refresh(holding)
+    if commit:
+        await db.commit()
+        await db.refresh(holding)
+    else:
+        await db.flush()
     return holding
 
 
@@ -50,6 +55,8 @@ async def adjust_holding(
     instrument_id: uuid.UUID,
     delta_quantity: Decimal,
     source: HoldingSource = HoldingSource.MANUAL,
+    *,
+    commit: bool = True,
 ) -> Holding:
     holding = await get_holding(db, account_id, instrument_id)
     if holding is None:
@@ -60,15 +67,21 @@ async def adjust_holding(
     else:
         holding.quantity = holding.quantity + delta_quantity
         holding.source = source
-    await db.commit()
-    await db.refresh(holding)
+    if commit:
+        await db.commit()
+        await db.refresh(holding)
+    else:
+        await db.flush()
     return holding
 
 
-async def delete_holding(db: AsyncSession, holding_id: uuid.UUID) -> bool:
+async def delete_holding(db: AsyncSession, holding_id: uuid.UUID, *, commit: bool = True) -> bool:
     holding = await db.get(Holding, holding_id)
     if holding is None:
         return False
     await db.delete(holding)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return True

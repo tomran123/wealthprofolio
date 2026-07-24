@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     default_base_currency: str = "USD"
     environment: str = "development"
 
+    # Agent / recovery
+    llm_encryption_key: str | None = None
+    agent_max_file_bytes: int = 20 * 1024 * 1024
+    agent_timezone: str = "Asia/Shanghai"
+    backup_max_bytes: int = 200 * 1024 * 1024
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,13 +1,20 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { AlertTriangle, Check, Loader2, Search } from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import {
+  ListSkeleton,
+  LoadingSpinner,
+} from "@/components/loading-state";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -15,90 +22,147 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api } from "@/lib/api";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { api, ApiError } from "@/lib/api";
+import { formatMoney } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
-import type { AssetClass, Instrument } from "@/lib/types";
+import type {
+  AssetClass,
+  Instrument,
+  MarketHoldingCreateResult,
+  MarketInstrumentSearchItem,
+  MarketInstrumentSearchResponse,
+} from "@/lib/types";
 
-const ASSET_CLASSES: AssetClass[] = [
-  "cash",
-  "equity",
-  "etf",
-  "bond",
-  "fund",
+const MANUAL_ASSET_CLASSES: AssetClass[] = [
   "real_estate",
   "private_equity",
   "company_equity",
-  "gold",
-  "crypto",
   "custom",
   "liability",
 ];
 
+type AddMode = "market" | "manual";
+
+const initialManualInstrument = {
+  name: "",
+  asset_class: "real_estate" as AssetClass,
+  currency: "USD",
+};
+
 export function AddHoldingDialog({ accountId }: { accountId: string }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const zh = locale === "zh";
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [creatingNew, setCreatingNew] = useState(false);
-  const [instrumentId, setInstrumentId] = useState("");
+  const [mode, setMode] = useState<AddMode>("market");
+  const [searchText, setSearchText] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [selected, setSelected] = useState<MarketInstrumentSearchItem | null>(
+    null,
+  );
   const [quantity, setQuantity] = useState("");
-  const [newInstrument, setNewInstrument] = useState({
-    name: "",
-    symbol: "",
-    asset_class: "equity" as AssetClass,
-    currency: "USD",
-  });
+  const [manualInstrument, setManualInstrument] = useState(
+    initialManualInstrument,
+  );
 
-  const instrumentsQuery = useQuery({
-    queryKey: ["instruments"],
-    queryFn: () => api.get<Instrument[]>("/api/instruments"),
-    enabled: open,
+  useEffect(() => {
+    const timeout = window.setTimeout(
+      () => setDebouncedSearch(searchText.trim()),
+      400,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [searchText]);
+
+  const searchQuery = useQuery({
+    queryKey: ["market-instruments", "search", debouncedSearch],
+    queryFn: () =>
+      api.get<MarketInstrumentSearchResponse>(
+        `/api/instruments/market-search?q=${encodeURIComponent(debouncedSearch)}`,
+      ),
+    enabled: open && mode === "market" && debouncedSearch.length > 0,
+    staleTime: 5 * 60 * 1000,
+    retry: 0,
   });
 
   const reset = () => {
-    setInstrumentId("");
+    setMode("market");
+    setSearchText("");
+    setDebouncedSearch("");
+    setSelected(null);
     setQuantity("");
-    setCreatingNew(false);
-    setNewInstrument({ name: "", symbol: "", asset_class: "equity", currency: "USD" });
+    setManualInstrument(initialManualInstrument);
   };
 
   const mutation = useMutation({
-    mutationFn: async () => {
-      let targetInstrumentId = instrumentId;
-      if (creatingNew) {
-        const created = await api.post<Instrument>("/api/instruments", {
-          name: newInstrument.name,
-          symbol: newInstrument.symbol || null,
-          asset_class: newInstrument.asset_class,
-          currency: newInstrument.currency.toUpperCase(),
-          price_source_type:
-            newInstrument.asset_class === "cash"
-              ? "fx_derived"
-              : ["equity", "etf", "fund", "crypto", "gold"].includes(newInstrument.asset_class)
-                ? "market"
-                : "manual",
-        });
-        targetInstrumentId = created.id;
+    mutationFn: async (): Promise<MarketHoldingCreateResult | null> => {
+      if (mode === "market") {
+        if (!selected) throw new Error("market_instrument_required");
+        return api.post<MarketHoldingCreateResult>(
+          "/api/holdings/from-market-search",
+          {
+            account_id: accountId,
+            selection_token: selected.selection_token,
+            quantity,
+          },
+        );
       }
-      return api.put("/api/holdings", {
+
+      const created = await api.post<Instrument>("/api/instruments", {
+        name: manualInstrument.name.trim(),
+        symbol: null,
+        asset_class: manualInstrument.asset_class,
+        currency: manualInstrument.currency.toUpperCase(),
+        price_source_type: "manual",
+      });
+      await api.put("/api/holdings", {
         account_id: accountId,
-        instrument_id: targetInstrumentId,
+        instrument_id: created.id,
         quantity,
       });
+      return null;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["accounts", accountId, "holdings"] });
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({
+        queryKey: ["accounts", accountId, "holdings"],
+      });
       queryClient.invalidateQueries({ queryKey: ["portfolio"] });
       queryClient.invalidateQueries({ queryKey: ["instruments"] });
-      toast.success(t("common.saved"));
+      if (result) {
+        const symbol =
+          result.holding.instrument_symbol ?? result.holding.instrument_name;
+        toast.success(
+          zh
+            ? `${symbol} 已添加 · 最新价 ${formatMoney(result.price, result.currency)} · 市值 ${formatMoney(result.market_value, result.currency)}`
+            : `${symbol} added · latest ${formatMoney(result.price, result.currency)} · value ${formatMoney(result.market_value, result.currency)}`,
+        );
+      } else {
+        toast.success(t("common.saved"));
+      }
       setOpen(false);
       reset();
     },
-    onError: () => toast.error(t("common.error")),
+    onError: (error) =>
+      toast.error(marketErrorMessage(error, zh, t("common.error"))),
   });
 
+  const validQuantity = quantity.trim() !== "" && Number(quantity) > 0;
   const canSubmit =
-    quantity.trim() !== "" && (creatingNew ? newInstrument.name.trim() !== "" : instrumentId !== "");
+    validQuantity &&
+    (mode === "market"
+      ? selected !== null
+      : manualInstrument.name.trim() !== "" &&
+        manualInstrument.currency.trim().length === 3);
+  const searchIsDebouncing = searchText.trim() !== debouncedSearch;
+  const visibleSearchResponse = searchIsDebouncing
+    ? undefined
+    : searchQuery.data;
 
   return (
     <Dialog
@@ -115,99 +179,350 @@ export function AddHoldingDialog({ accountId }: { accountId: string }) {
           </Button>
         }
       />
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("accounts.add_holding")}</DialogTitle>
+          <DialogDescription>
+            {mode === "market"
+              ? t("accounts.market_search_description")
+              : t("accounts.manual_description")}
+          </DialogDescription>
         </DialogHeader>
-        <div className="space-y-3">
-          {!creatingNew ? (
-            <div className="space-y-1.5">
-              <Label>{t("accounts.instrument")}</Label>
-              <Select value={instrumentId} onValueChange={(v) => setInstrumentId(v ?? "")}>
-                <SelectTrigger>
-                  <SelectValue placeholder={t("accounts.select_instrument")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {(instrumentsQuery.data ?? []).map((inst) => (
-                    <SelectItem key={inst.id} value={inst.id}>
-                      {inst.symbol ? `${inst.symbol} · ${inst.name}` : inst.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <button
-                type="button"
-                className="text-xs text-muted-foreground underline"
-                onClick={() => setCreatingNew(true)}
-              >
-                {t("accounts.create_new_instrument")}
-              </button>
-            </div>
+
+        <div className="space-y-4">
+          {mode === "market" ? (
+            <MarketInstrumentSearch
+              searchText={searchText}
+              setSearchText={(value) => {
+                setSearchText(value);
+                setSelected(null);
+              }}
+              selected={selected}
+              setSelected={setSelected}
+              response={visibleSearchResponse}
+              isLoading={searchIsDebouncing || searchQuery.isFetching}
+              isError={!searchIsDebouncing && searchQuery.isError}
+              zh={zh}
+              t={t}
+            />
           ) : (
-            <div className="space-y-3 rounded-md border p-3">
+            <div className="space-y-3 rounded-lg border p-4">
               <div className="space-y-1.5">
                 <Label>{t("accounts.name")}</Label>
                 <Input
-                  value={newInstrument.name}
-                  onChange={(e) => setNewInstrument((f) => ({ ...f, name: e.target.value }))}
+                  value={manualInstrument.name}
+                  onChange={(event) =>
+                    setManualInstrument((old) => ({
+                      ...old,
+                      name: event.target.value,
+                    }))
+                  }
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>{t("accounts.symbol")}</Label>
-                  <Input
-                    value={newInstrument.symbol}
-                    onChange={(e) => setNewInstrument((f) => ({ ...f, symbol: e.target.value.toUpperCase() }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
                   <Label>{t("accounts.currency")}</Label>
                   <Input
                     maxLength={3}
-                    value={newInstrument.currency}
-                    onChange={(e) => setNewInstrument((f) => ({ ...f, currency: e.target.value.toUpperCase() }))}
+                    value={manualInstrument.currency}
+                    onChange={(event) =>
+                      setManualInstrument((old) => ({
+                        ...old,
+                        currency: event.target.value.toUpperCase(),
+                      }))
+                    }
                   />
                 </div>
+                <div className="space-y-1.5">
+                  <Label>{t("accounts.asset_class")}</Label>
+                  <Select
+                    value={manualInstrument.asset_class}
+                    onValueChange={(value) => {
+                      if (value)
+                        setManualInstrument((old) => ({
+                          ...old,
+                          asset_class: value as AssetClass,
+                        }));
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {MANUAL_ASSET_CLASSES.map((assetClass) => (
+                        <SelectItem key={assetClass} value={assetClass}>
+                          {assetClass}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <Label>{t("accounts.asset_class")}</Label>
-                <Select
-                  value={newInstrument.asset_class}
-                  onValueChange={(v) => setNewInstrument((f) => ({ ...f, asset_class: v as AssetClass }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ASSET_CLASSES.map((cls) => (
-                      <SelectItem key={cls} value={cls}>
-                        {cls}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <button
-                type="button"
-                className="text-xs text-muted-foreground underline"
-                onClick={() => setCreatingNew(false)}
-              >
-                {t("common.cancel")}
-              </button>
             </div>
           )}
 
           <div className="space-y-1.5">
-            <Label>{t("accounts.quantity")}</Label>
-            <Input value={quantity} onChange={(e) => setQuantity(e.target.value)} inputMode="decimal" />
+            <Label>
+              {mode === "market"
+                ? t("accounts.market_quantity")
+                : t("accounts.quantity")}
+            </Label>
+            <Input
+              type="number"
+              min="0"
+              step="any"
+              value={quantity}
+              onChange={(event) => setQuantity(event.target.value)}
+              inputMode="decimal"
+            />
           </div>
+
+          {mode === "market" && (
+            <div className="flex items-start gap-2 rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">
+              <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />
+              <span>{t("accounts.auto_price_notice")}</span>
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="text-xs text-muted-foreground underline underline-offset-4"
+            onClick={() => {
+              setMode(mode === "market" ? "manual" : "market");
+              setSelected(null);
+            }}
+          >
+            {mode === "market"
+              ? t("accounts.add_manual_asset")
+              : t("accounts.back_to_market_search")}
+          </button>
         </div>
+
         <DialogFooter>
-          <Button disabled={!canSubmit || mutation.isPending} onClick={() => mutation.mutate()}>
-            {t("common.save")}
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            {t("common.cancel")}
+          </Button>
+          <Button
+            disabled={!canSubmit || mutation.isPending}
+            aria-busy={mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending && (
+              <LoadingSpinner
+                label={
+                  mode === "market"
+                    ? t("accounts.fetching_price")
+                    : t("common.loading")
+                }
+              />
+            )}
+            {mutation.isPending
+              ? mode === "market"
+                ? t("accounts.fetching_price")
+                : t("common.loading")
+              : t("common.save")}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+function MarketInstrumentSearch({
+  searchText,
+  setSearchText,
+  selected,
+  setSelected,
+  response,
+  isLoading,
+  isError,
+  zh,
+  t,
+}: {
+  searchText: string;
+  setSearchText: (value: string) => void;
+  selected: MarketInstrumentSearchItem | null;
+  setSelected: (value: MarketInstrumentSearchItem) => void;
+  response?: MarketInstrumentSearchResponse;
+  isLoading: boolean;
+  isError: boolean;
+  zh: boolean;
+  t: (key: string) => string;
+}) {
+  return (
+    <div className="space-y-2" aria-busy={isLoading}>
+      <Label htmlFor="market-instrument-search">
+        {t("accounts.search_market_instrument")}
+      </Label>
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          id="market-instrument-search"
+          value={searchText}
+          onChange={(event) => setSearchText(event.target.value)}
+          placeholder={t("accounts.market_search_placeholder")}
+          className="pl-9 pr-9"
+          autoComplete="off"
+        />
+        {isLoading && (
+          <Loader2
+            aria-hidden="true"
+            className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground motion-reduce:animate-none"
+          />
+        )}
+      </div>
+
+      {selected ? (
+        <div className="flex w-full items-center justify-between gap-3 rounded-lg border border-primary bg-primary/5 p-3">
+          <InstrumentIdentity item={selected} zh={zh} />
+          <Check className="h-5 w-5 shrink-0 text-primary" />
+        </div>
+      ) : (
+        <SearchResults
+          searchText={searchText}
+          response={response}
+          isLoading={isLoading}
+          isError={isError}
+          zh={zh}
+          t={t}
+          setSelected={setSelected}
+        />
+      )}
+
+      {(response?.unavailable_sources.length ?? 0) > 0 && (
+        <div className="flex items-start gap-1.5 text-xs text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            {t("accounts.search_partial_unavailable")} (
+            {response?.unavailable_sources.join(", ")})
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SearchResults({
+  searchText,
+  response,
+  isLoading,
+  isError,
+  zh,
+  t,
+  setSelected,
+}: {
+  searchText: string;
+  response?: MarketInstrumentSearchResponse;
+  isLoading: boolean;
+  isError: boolean;
+  zh: boolean;
+  t: (key: string) => string;
+  setSelected: (value: MarketInstrumentSearchItem) => void;
+}) {
+  if (!searchText.trim()) {
+    return (
+      <p className="px-1 text-xs text-muted-foreground">
+        {t("accounts.market_search_examples")}
+      </p>
+    );
+  }
+  if (isError) {
+    return (
+      <p className="px-1 text-sm text-destructive">
+        {t("accounts.search_failed")}
+      </p>
+    );
+  }
+  if (isLoading && !response) {
+    return (
+      <ListSkeleton
+        compact
+        rows={3}
+        label={t("accounts.searching")}
+        className="pt-1"
+      />
+    );
+  }
+  if (response && response.items.length === 0) {
+    return (
+      <p className="px-1 text-sm text-muted-foreground">
+        {t("accounts.no_market_results")}
+      </p>
+    );
+  }
+  if (!response) return null;
+
+  return (
+    <div className="max-h-72 overflow-y-auto rounded-lg border p-1">
+      {response.items.map((item) => (
+        <button
+          key={item.selection_token}
+          type="button"
+          className="flex w-full items-center rounded-md px-3 py-2.5 text-left transition-colors hover:bg-muted"
+          onClick={() => setSelected(item)}
+        >
+          <InstrumentIdentity item={item} zh={zh} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function InstrumentIdentity({
+  item,
+  zh,
+}: {
+  item: MarketInstrumentSearchItem;
+  zh: boolean;
+}) {
+  const sourceLabels: Record<string, string> = {
+    local: zh ? "已录入" : "Saved",
+    yahoo: "Yahoo",
+    akshare: zh ? "中国市场" : "China market",
+    coingecko: "CoinGecko",
+  };
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-semibold">{item.symbol}</span>
+        <span className="truncate text-sm">{item.name}</span>
+        <Badge variant="outline" className="text-[10px]">
+          {sourceLabels[item.source] ?? item.source}
+        </Badge>
+      </div>
+      <div className="mt-0.5 text-xs text-muted-foreground">
+        {item.market} · {item.asset_class} · {item.currency}
+        {item.exchange ? ` · ${item.exchange}` : ""}
+      </div>
+    </div>
+  );
+}
+
+function marketErrorMessage(error: unknown, zh: boolean, fallback: string) {
+  const detail =
+    error instanceof ApiError
+      ? error.message
+      : error instanceof Error
+        ? error.message
+        : "";
+  const messages: Record<string, [string, string]> = {
+    market_quote_unavailable: [
+      "暂时无法取得该产品的有效价格，持仓没有保存，请稍后重试",
+      "No valid quote is currently available. The holding was not saved; please try again later.",
+    ],
+    market_selection_expired: [
+      "搜索结果已过期，请重新搜索并选择",
+      "The search result expired. Search and select it again.",
+    ],
+    invalid_market_selection: [
+      "产品选择无效，请重新搜索",
+      "Invalid product selection. Please search again.",
+    ],
+    account_not_found: ["账户不存在", "Account not found"],
+    instrument_not_found: [
+      "产品已不存在，请重新搜索",
+      "The instrument no longer exists. Please search again.",
+    ],
+  };
+  return messages[detail]?.[zh ? 0 : 1] ?? fallback;
 }

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Numeric, String
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Index, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,6 +15,14 @@ class PriceSnapshot(UUIDPrimaryKeyMixin, Base):
     manual valuation, or a fixed/derived price for cash & deposits)."""
 
     __tablename__ = "price_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_price_snapshots_instrument_as_of",
+            "instrument_id",
+            "as_of",
+            "fetched_at",
+        ),
+    )
 
     instrument_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("instruments.id", ondelete="CASCADE"), nullable=False, index=True
