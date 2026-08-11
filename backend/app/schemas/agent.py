@@ -87,6 +87,9 @@ class AgentOperationLogRead(BaseModel):
     description: str
     tool_calls: list[dict[str, Any]]
     change_summary: dict[str, int]
+    event_ids: list[uuid.UUID] = []
+    summary: dict[str, Any] = {}
+    is_undoable: bool = False
     is_undone: bool
     undone_at: datetime | None
     linked_to_id: uuid.UUID | None

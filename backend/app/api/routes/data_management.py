@@ -5,7 +5,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import (
+    RequestContext,
+    get_current_user,
+    get_db,
+    require_family_admin,
+    require_system_admin,
+)
 from app.models import ImportBatch
 from app.schemas.import_batch import ImportBatchRead
 from app.core.config import get_settings
@@ -78,14 +84,17 @@ async def export_csv(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/export/json")
-async def export_json(db: AsyncSession = Depends(get_db)):
+async def export_json(
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_family_admin),
+):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     content = await data_export_service.export_json_bytes(db)
     return _download(content, "application/json", f"wealthportfolio_{stamp}.json")
 
 
 @router.get("/backup/download")
-async def download_database_backup():
+async def download_database_backup(_=Depends(require_system_admin)):
     try:
         content = await database_backup_service.create_sql_backup()
     except RuntimeError as exc:
@@ -99,6 +108,7 @@ async def restore_database_backup(
     confirmation: str = Form(...),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    context: RequestContext = Depends(require_family_admin),
 ):
     if confirmation != "RESTORE":
         raise HTTPException(status_code=400, detail="restore_confirmation_required")
@@ -112,6 +122,12 @@ async def restore_database_backup(
             restored = await data_export_service.restore_json_bytes(db, content)
             return {"ok": True, "format": "json", "restored": restored}
         if file.filename.lower().endswith(".sql"):
+            # SQL restores replace the entire deployment, not only the active
+            # family, and therefore require the platform-level administrator.
+            await require_system_admin(
+                context=context,
+                db=db,
+            )
             # Authentication already ran; release its read transaction before a
             # separate psql process takes schema locks for the restore.
             await db.rollback()

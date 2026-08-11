@@ -5,10 +5,10 @@ from sqlalchemy import DateTime, Numeric, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, UUIDPrimaryKeyMixin
 
 
-class ValuationSnapshot(UUIDPrimaryKeyMixin, Base):
+class ValuationSnapshot(UUIDPrimaryKeyMixin, FamilyScopedMixin, Base):
     """An immutable whole-portfolio valuation captured after a refresh or on demand."""
 
     __tablename__ = "valuation_snapshots"

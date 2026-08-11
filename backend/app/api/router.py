@@ -5,11 +5,14 @@ from app.api.routes import (
     agent,
     auth,
     data_management,
+    documents,
     exposure_groups,
     fx_rates,
     holdings,
     institutions,
     instruments,
+    jobs,
+    knowledge,
     llm_providers,
     owners,
     portfolio,
@@ -20,6 +23,7 @@ from app.api.routes import (
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(agent.router)
+api_router.include_router(agent.jobs_router)
 api_router.include_router(owners.router)
 api_router.include_router(institutions.router)
 api_router.include_router(exposure_groups.router)
@@ -32,3 +36,6 @@ api_router.include_router(settings.router)
 api_router.include_router(data_management.router)
 api_router.include_router(transactions.router)
 api_router.include_router(llm_providers.router)
+api_router.include_router(documents.router)
+api_router.include_router(knowledge.router)
+api_router.include_router(jobs.router)

@@ -1,6 +1,15 @@
 "use client";
 
-import { Bot, Database, LandmarkIcon, LayoutDashboard, LineChart, LogOut, ReceiptText } from "lucide-react";
+import {
+  Bot,
+  Database,
+  FileText,
+  LandmarkIcon,
+  LayoutDashboard,
+  LineChart,
+  LogOut,
+  ReceiptText,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -14,6 +23,7 @@ const NAV_ITEMS = [
   { href: "/assets", key: "nav.assets", icon: LineChart },
   { href: "/accounts", key: "nav.accounts", icon: LandmarkIcon },
   { href: "/transactions", key: "nav.transactions", icon: ReceiptText },
+  { href: "/documents", key: "nav.documents", icon: FileText },
   { href: "/agent", key: "nav.agent", icon: Bot },
   { href: "/data", key: "nav.data", icon: Database },
 ] as const;
@@ -37,7 +47,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <header className="border-b bg-card">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="text-lg font-semibold">WealthPortfolio</div>
-          <nav className="flex flex-wrap items-center gap-1">
+          <nav className="order-3 -mx-1 flex w-[calc(100%+0.5rem)] items-center gap-1 overflow-x-auto px-1 pb-0.5 lg:order-none lg:mx-0 lg:w-auto lg:px-0">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const active = pathname?.startsWith(item.href);
@@ -45,8 +55,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
+                  aria-current={active ? "page" : undefined}
                   className={cn(
-                    "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                    "flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                     active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
                   )}
                 >

@@ -83,6 +83,14 @@ class TransactionType(str, enum.Enum):
     FEE = "fee"
     MANUAL_ADJUSTMENT = "manual_adjustment"
     VALUATION_UPDATE = "valuation_update"
+    OPENING_BALANCE = "opening_balance"
+    RECONCILIATION = "reconciliation"
+    TAX = "tax"
+    SPLIT = "split"
+    REVERSE_SPLIT = "reverse_split"
+    MERGER = "merger"
+    STOCK_DIVIDEND = "stock_dividend"
+    METADATA_AMENDED = "metadata_amended"
 
 
 class TransactionSource(str, enum.Enum):

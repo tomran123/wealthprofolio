@@ -7,6 +7,7 @@ from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.redis_state import redis_delete, redis_get, redis_set
 from app.models import Account, Holding, Instrument, PriceSnapshot
 from app.models.enums import PriceSourceType
 from app.providers.fx import FrankfurterFXAdapter
@@ -22,6 +23,34 @@ PROVIDER_FAILURE_BACKOFF_SECONDS = 60.0
 PROVIDER_EMPTY_BACKOFF_SECONDS = 30.0
 settings = get_settings()
 _PROVIDER_BACKOFF_UNTIL: dict[str, float] = {}
+
+
+def _provider_backoff_key(provider_name: str) -> str:
+    return f"wealthportfolio:price-provider-backoff:v1:{provider_name}"
+
+
+async def _provider_is_backed_off(provider_name: str) -> bool:
+    available, value = await redis_get(_provider_backoff_key(provider_name))
+    if available:
+        _PROVIDER_BACKOFF_UNTIL.pop(provider_name, None)
+        return value is not None
+    return _PROVIDER_BACKOFF_UNTIL.get(provider_name, 0.0) > monotonic()
+
+
+async def _set_provider_backoff(provider_name: str, seconds: int) -> None:
+    if await redis_set(
+        _provider_backoff_key(provider_name),
+        "1",
+        ttl_seconds=seconds,
+    ):
+        _PROVIDER_BACKOFF_UNTIL.pop(provider_name, None)
+        return
+    _PROVIDER_BACKOFF_UNTIL[provider_name] = monotonic() + seconds
+
+
+async def _clear_provider_backoff(provider_name: str) -> None:
+    _PROVIDER_BACKOFF_UNTIL.pop(provider_name, None)
+    await redis_delete(_provider_backoff_key(provider_name))
 
 
 async def load_instruments_needing_refresh(db: AsyncSession) -> list[Instrument]:
@@ -50,8 +79,7 @@ async def _fetch_group(
     routed: list[RoutedInstrument],
     semaphore: asyncio.Semaphore,
 ) -> tuple[list[RoutedInstrument], dict[str, Any], str | None]:
-    backoff_until = _PROVIDER_BACKOFF_UNTIL.get(adapter.name, 0.0)
-    if backoff_until > monotonic():
+    if await _provider_is_backed_off(adapter.name):
         return routed, {}, f"{adapter.name}: temporarily_unavailable"
     symbols = list(dict.fromkeys(item.provider_symbol for item in routed if item.provider_symbol))
     if not symbols:
@@ -74,15 +102,17 @@ async def _fetch_group(
                 timeout=PRICE_PROVIDER_TIMEOUT_SECONDS,
             )
         if not rows:
-            _PROVIDER_BACKOFF_UNTIL[adapter.name] = (
-                monotonic() + PROVIDER_EMPTY_BACKOFF_SECONDS
+            await _set_provider_backoff(
+                adapter.name,
+                int(PROVIDER_EMPTY_BACKOFF_SECONDS),
             )
             return routed, {}, f"{adapter.name}: no_quotes"
-        _PROVIDER_BACKOFF_UNTIL.pop(adapter.name, None)
+        await _clear_provider_backoff(adapter.name)
         return routed, {row.symbol: row for row in rows}, None
     except Exception as exc:
-        _PROVIDER_BACKOFF_UNTIL[adapter.name] = (
-            monotonic() + PROVIDER_FAILURE_BACKOFF_SECONDS
+        await _set_provider_backoff(
+            adapter.name,
+            int(PROVIDER_FAILURE_BACKOFF_SECONDS),
         )
         return routed, {}, f"{adapter.name}: {type(exc).__name__}"
 

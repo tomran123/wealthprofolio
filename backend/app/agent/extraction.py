@@ -5,8 +5,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.config import get_settings
 from app.providers.llm.client import LLMClient
 from app.schemas.agent import ExtractedDocumentData
+
+settings = get_settings()
 
 ALLOWED_AGENT_MIME_TYPES = {
     "image/jpeg",
@@ -28,17 +31,24 @@ def _image_url(content: bytes, content_type: str) -> str:
     return f"data:{content_type};base64,{encoded}"
 
 
-def _render_pdf(content: bytes, max_pages: int = 5) -> list[bytes]:
+def _render_pdf(content: bytes, max_pages: int | None = None) -> list[bytes]:
     import fitz
 
     document = fitz.open(stream=content, filetype="pdf")
-    images: list[bytes] = []
-    matrix = fitz.Matrix(2, 2)
-    for page_index in range(min(len(document), max_pages)):
-        pixmap = document[page_index].get_pixmap(matrix=matrix, alpha=False)
-        images.append(pixmap.tobytes("png"))
-    document.close()
-    return images
+    try:
+        images: list[bytes] = []
+        page_limit = max_pages or settings.document_vision_max_pages
+        for page_index in range(min(len(document), page_limit)):
+            page = document[page_index]
+            # Keep the longest edge below 2048px. This bounds the base64
+            # request and worker memory even for unusually large PDF pages.
+            longest_edge = max(float(page.rect.width), float(page.rect.height), 1.0)
+            scale = min(1.5, 2048.0 / longest_edge)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            images.append(pixmap.tobytes("png"))
+        return images
+    finally:
+        document.close()
 
 
 async def _content_blocks(documents: list[UploadedDocument]) -> list[dict[str, Any]]:

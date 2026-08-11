@@ -1,20 +1,24 @@
 import uuid
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum as SAEnum, ForeignKey, Numeric, UniqueConstraint
+from sqlalchemy import Enum as SAEnum, ForeignKey, Integer, Numeric, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import HoldingSource
 
+if TYPE_CHECKING:
+    from app.models.account import Account
+    from app.models.instrument import Instrument
 
-class Holding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+
+class Holding(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """The materialized current quantity of one Instrument held in one Account.
 
-    This is intentionally a "current state" table (fast to aggregate/query), separate
-    from the append-only Transaction ledger that will be introduced in Phase 3 and will
-    keep this table's quantity in sync.
+    This is intentionally a current-state projection for fast reads. Only the
+    transaction event service and deterministic replay may write its quantity.
     """
 
     __tablename__ = "holdings"
@@ -31,6 +35,12 @@ class Holding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         SAEnum(HoldingSource, native_enum=False, length=20, values_callable=lambda x: [e.value for e in x]),
         default=HoldingSource.MANUAL,
         nullable=False,
+    )
+    projection_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     account: Mapped["Account"] = relationship("Account", back_populates="holdings")

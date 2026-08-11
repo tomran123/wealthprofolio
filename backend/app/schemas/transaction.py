@@ -171,10 +171,15 @@ class TransactionRead(BaseModel):
     reversed_by_id: uuid.UUID | None
 
 
-class TransactionSummary(BaseModel):
+class TransactionCurrencySummary(BaseModel):
+    currency: str = Field(min_length=3, max_length=3)
     total_buy: Decimal
     total_sell: Decimal
     net_cash_flow: Decimal
+
+
+class TransactionSummary(BaseModel):
+    by_currency: list[TransactionCurrencySummary]
 
 
 class TransactionPage(BaseModel):

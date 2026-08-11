@@ -5,10 +5,17 @@
 
 # Secrets / environment
 .env
-backups/*.sql
-backups/*.sql.tmp
+backups/*
+!backups/.gitkeep
 backend/.env
 frontend/.env.local
+
+# Local Terraform state and real cloud inputs
+deploy/alicloud/terraform/.terraform/
+deploy/alicloud/terraform/*.tfstate
+deploy/alicloud/terraform/*.tfstate.*
+deploy/alicloud/terraform/*.tfvars
+!deploy/alicloud/terraform/terraform.tfvars.example
 
 # Python
 backend/.venv/

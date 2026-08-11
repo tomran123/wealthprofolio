@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.family_scope import family_scoped_get
 from app.models import Owner
 from app.schemas.owner import OwnerCreate, OwnerUpdate
 
@@ -19,7 +20,7 @@ async def search_owners(db: AsyncSession, query: str) -> list[Owner]:
 
 
 async def get_owner(db: AsyncSession, owner_id: uuid.UUID) -> Owner | None:
-    return await db.get(Owner, owner_id)
+    return await family_scoped_get(db, Owner, owner_id)
 
 
 async def create_owner(
@@ -49,7 +50,7 @@ async def update_owner(
     *,
     commit: bool = True,
 ) -> Owner | None:
-    owner = await db.get(Owner, owner_id)
+    owner = await family_scoped_get(db, Owner, owner_id)
     if owner is None:
         return None
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -63,7 +64,7 @@ async def update_owner(
 
 
 async def delete_owner(db: AsyncSession, owner_id: uuid.UUID, *, commit: bool = True) -> bool:
-    owner = await db.get(Owner, owner_id)
+    owner = await family_scoped_get(db, Owner, owner_id)
     if owner is None:
         return False
     await db.delete(owner)

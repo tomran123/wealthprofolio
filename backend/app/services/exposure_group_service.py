@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.family_scope import family_scoped_get
 from app.models import ExposureGroup
 from app.schemas.exposure_group import ExposureGroupCreate, ExposureGroupUpdate
 
@@ -39,7 +40,7 @@ async def update_exposure_group(
     *,
     commit: bool = True,
 ) -> ExposureGroup | None:
-    group = await db.get(ExposureGroup, group_id)
+    group = await family_scoped_get(db, ExposureGroup, group_id)
     if group is None:
         return None
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -58,7 +59,7 @@ async def delete_exposure_group(
     *,
     commit: bool = True,
 ) -> bool:
-    group = await db.get(ExposureGroup, group_id)
+    group = await family_scoped_get(db, ExposureGroup, group_id)
     if group is None:
         return False
     await db.delete(group)

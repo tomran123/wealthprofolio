@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_db, require_family_admin
 from app.models import LLMProviderConfig
 from app.schemas.llm_provider import LLMProviderCreate, LLMProviderRead, LLMProviderUpdate
 from app.services import llm_provider_service
@@ -11,7 +11,7 @@ from app.services import llm_provider_service
 router = APIRouter(
     prefix="/api/settings/llm-providers",
     tags=["llm-providers"],
-    dependencies=[Depends(get_current_user)],
+    dependencies=[Depends(require_family_admin)],
 )
 
 
@@ -53,6 +53,8 @@ async def update_provider(
         provider = await llm_provider_service.update_provider(db, provider_id, payload)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider is None:
         raise HTTPException(status_code=404, detail="llm_provider_not_found")
     return _to_schema(provider)

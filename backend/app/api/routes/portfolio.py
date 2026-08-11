@@ -1,22 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.config import get_settings
+from app.core.family_scope import get_bound_request_context
+from app.models.document import BackgroundJob
 from app.schemas.portfolio import (
     AggregateResponse,
     PortfolioSummary,
-    RefreshResultRead,
     ValuationSnapshotPage,
     ValuationSnapshotRead,
 )
 from app.services import (
     portfolio_service,
-    price_refresh_service,
+    price_job_service,
     settings_service,
     valuation_snapshot_service,
     transaction_service,
 )
+from app.schemas.document import BackgroundJobRead
+from app.services.document_service import job_schema
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"], dependencies=[Depends(get_current_user)])
 settings = get_settings()
@@ -52,9 +55,40 @@ def _snapshot_schema(snapshot) -> ValuationSnapshotRead:
     )
 
 
-@router.post("/refresh", response_model=RefreshResultRead)
-async def refresh_all_prices(db: AsyncSession = Depends(get_db)):
-    return await price_refresh_service.refresh_all_prices(db)
+@router.post(
+    "/refresh",
+    response_model=BackgroundJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refresh_all_prices(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    context = get_bound_request_context(db)
+    if context is None:
+        raise HTTPException(status_code=401, detail="request_context_required")
+    job = BackgroundJob(
+        job_type="prices.refresh",
+        status="queued",
+        stage="queued",
+        progress=0,
+        message="Price refresh queued",
+        input_json={},
+        resource_type="valuation_snapshot",
+        created_by_user_id=context.user_id,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    try:
+        price_job_service.enqueue_price_refresh_job(background_tasks, job)
+    except RuntimeError as exc:
+        job.status = "failed"
+        job.stage = "failed"
+        job.error = str(exc)
+        await db.commit()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return job_schema(job)
 
 
 @router.get("/snapshots", response_model=ValuationSnapshotPage)

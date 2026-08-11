@@ -40,7 +40,15 @@ export type TransactionType =
   | "interest"
   | "fee"
   | "manual_adjustment"
-  | "valuation_update";
+  | "valuation_update"
+  | "opening_balance"
+  | "reconciliation"
+  | "tax"
+  | "split"
+  | "reverse_split"
+  | "merger"
+  | "stock_dividend"
+  | "metadata_amended";
 export type TransactionSource = "manual" | "import" | "agent" | "screenshot";
 export type LLMRole = "chat" | "vision";
 
@@ -282,9 +290,12 @@ export interface TransactionPage {
   offset: number;
   limit: number;
   summary: {
-    total_buy: string;
-    total_sell: string;
-    net_cash_flow: string;
+    by_currency: Array<{
+      currency: string;
+      total_buy: string;
+      total_sell: string;
+      net_cash_flow: string;
+    }>;
   };
 }
 
@@ -380,16 +391,37 @@ export interface AgentSessionDetail extends AgentSession {
   messages: AgentMessage[];
 }
 
+export interface AgentOperationLogToolCall {
+  id?: string;
+  tool?: string;
+  effect?: "create" | "update" | "delete";
+  resource?: string;
+  status?: string;
+  event_ids?: string[];
+}
+
+export interface AgentOperationSummary {
+  operation_count?: number;
+  effects?: Record<string, number>;
+  resources?: string[];
+  event_count?: number;
+  compensates_log_id?: string;
+  [key: string]: unknown;
+}
+
 export interface AgentOperationLog {
   id: string;
   created_at: string;
   session_id: string;
   turn_index: number;
-  operation_type: "tool_call" | "query" | "undo";
+  operation_type: string;
   user_message: string;
   description: string;
-  tool_calls: AgentToolTrace[];
+  tool_calls: AgentOperationLogToolCall[];
   change_summary: { created: number; updated: number; deleted: number };
+  event_ids: string[];
+  summary: AgentOperationSummary;
+  is_undoable: boolean;
   is_undone: boolean;
   undone_at: string | null;
   linked_to_id: string | null;
@@ -400,4 +432,253 @@ export interface AgentOperationLogPage {
   total: number;
   offset: number;
   limit: number;
+}
+
+export interface AgentUndoResult {
+  ok: boolean;
+  log_id: string;
+  undone_at: string;
+}
+
+export type DocumentStatus =
+  | "pending_upload"
+  | "uploading"
+  | "uploaded"
+  | "queued"
+  | "processing"
+  | "ready"
+  | "failed"
+  | "archived";
+
+export type DocumentPageStatus =
+  | "pending"
+  | "processing"
+  | "ready"
+  | "failed";
+
+export type BackgroundJobStatus =
+  | "pending"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface BackgroundJob<
+  TResult = Record<string, unknown>,
+> {
+  id: string;
+  job_type: string;
+  status: BackgroundJobStatus;
+  stage: string | null;
+  progress: number;
+  message: string | null;
+  error: string | null;
+  result: TResult | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface JobSnapshotEvent<
+  TResult = Record<string, unknown>,
+> {
+  type: "job.snapshot";
+  job: BackgroundJob<TResult>;
+}
+
+export interface DocumentUploadIntentInput {
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256?: string;
+  document_type?: string;
+  owner_id?: string;
+  institution_id?: string;
+  account_id?: string;
+  document_date?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DocumentUploadTarget {
+  method: "PUT";
+  url: string;
+  headers: Record<string, string>;
+  expires_at: string;
+}
+
+export interface DocumentUploadIntent {
+  document_id: string;
+  version_id: string;
+  status: DocumentStatus;
+  duplicate: boolean;
+  upload: DocumentUploadTarget | null;
+  upload_token: string | null;
+}
+
+export interface DocumentContentReceipt {
+  document_id: string;
+  version_id: string;
+  received_bytes: number;
+  sha256: string;
+}
+
+export interface DocumentPage {
+  id: string;
+  page_number: number;
+  status: DocumentPageStatus;
+  text_preview: string | null;
+  ocr_confidence: number | null;
+  preview_url: string | null;
+  width: number | null;
+  height: number | null;
+}
+
+export interface DocumentCitation {
+  document_id: string;
+  filename: string;
+  page_number: number;
+  citation: string;
+  bounding_boxes: number[][];
+  content: string | null;
+}
+
+export interface DocumentExtractedField {
+  name: string;
+  label: string | null;
+  value: unknown;
+  confidence: number | null;
+  page_number: number | null;
+  citation: string | null;
+  bounding_box: number[] | null;
+}
+
+export interface DocumentExtraction {
+  id: string;
+  extraction_type: string;
+  status: string;
+  summary: string | null;
+  confidence: number | null;
+  fields: DocumentExtractedField[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentSummary {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  document_type: string | null;
+  document_date: string | null;
+  status: DocumentStatus;
+  page_count: number;
+  owner_id: string | null;
+  institution_id: string | null;
+  account_id: string | null;
+  latest_job_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentDetail extends DocumentSummary {
+  sha256: string;
+  metadata: Record<string, unknown>;
+  pages: DocumentPage[];
+  extractions: DocumentExtraction[];
+}
+
+export interface DocumentPageResult {
+  items: DocumentSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface DocumentCompleteResult {
+  document: DocumentSummary;
+  job: BackgroundJob;
+}
+
+export interface KnowledgeFilters {
+  limit?: number;
+  document_ids?: string[];
+  document_types?: string[];
+  date_from?: string;
+  date_to?: string;
+  institution_id?: string;
+  account_id?: string;
+}
+
+export interface KnowledgeSearchInput extends KnowledgeFilters {
+  query: string;
+}
+
+export interface KnowledgeSearchItem {
+  chunk_id: string;
+  document_id: string;
+  filename: string;
+  page_number: number;
+  content: string;
+  score: number;
+  citation: string;
+  bounding_boxes: number[][];
+}
+
+export interface KnowledgeSearchResult {
+  items: KnowledgeSearchItem[];
+  retrieval_mode: string;
+  degraded: boolean;
+}
+
+export interface KnowledgeQueryInput extends KnowledgeFilters {
+  question: string;
+}
+
+export interface KnowledgeQueryResult {
+  answer: string;
+  citations: DocumentCitation[];
+  retrieval_mode: string;
+  degraded: boolean;
+  warnings: string[];
+}
+
+export type TransactionDraftStatus =
+  | "pending_review"
+  | "confirmed"
+  | "cancelled"
+  | "failed";
+
+export interface DocumentTransactionDraftItem {
+  id: string | null;
+  transaction_type: string;
+  account_id: string | null;
+  account_name: string | null;
+  instrument_id: string | null;
+  instrument_name: string | null;
+  instrument_symbol: string | null;
+  quantity: string | null;
+  price: string | null;
+  amount: string | null;
+  currency: string;
+  fee: string | null;
+  trade_date: string | null;
+  note: string | null;
+  confidence: number | null;
+  page_number: number | null;
+  citation: string | null;
+}
+
+export interface DocumentTransactionDraft {
+  id: string;
+  document_id: string;
+  extraction_id: string;
+  status: TransactionDraftStatus;
+  items: DocumentTransactionDraftItem[];
+  warnings: string[];
+  created_at: string;
+  resolved_at: string | null;
 }

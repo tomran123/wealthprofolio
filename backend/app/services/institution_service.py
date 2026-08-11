@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.family_scope import family_scoped_get
 from app.models import Institution
 from app.schemas.institution import InstitutionCreate, InstitutionUpdate
 
@@ -19,7 +20,7 @@ async def search_institutions(db: AsyncSession, query: str) -> list[Institution]
 
 
 async def get_institution(db: AsyncSession, institution_id: uuid.UUID) -> Institution | None:
-    return await db.get(Institution, institution_id)
+    return await family_scoped_get(db, Institution, institution_id)
 
 
 async def create_institution(
@@ -49,7 +50,7 @@ async def update_institution(
     *,
     commit: bool = True,
 ) -> Institution | None:
-    institution = await db.get(Institution, institution_id)
+    institution = await family_scoped_get(db, Institution, institution_id)
     if institution is None:
         return None
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -68,7 +69,7 @@ async def delete_institution(
     *,
     commit: bool = True,
 ) -> bool:
-    institution = await db.get(Institution, institution_id)
+    institution = await family_scoped_get(db, Institution, institution_id)
     if institution is None:
         return False
     await db.delete(institution)

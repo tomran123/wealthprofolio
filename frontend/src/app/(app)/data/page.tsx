@@ -1,7 +1,14 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, History, RotateCcw, ShieldCheck, Upload } from "lucide-react";
+import {
+  AlertTriangle,
+  Download,
+  History,
+  RotateCcw,
+  ShieldCheck,
+  Upload,
+} from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -9,6 +16,12 @@ import {
   LoadingSpinner,
   TableSkeleton,
 } from "@/components/loading-state";
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,14 +39,19 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import type { AgentOperationLog, AgentOperationLogPage, ImportBatch } from "@/lib/types";
+import type {
+  AgentOperationLog,
+  AgentOperationLogPage,
+  AgentUndoResult,
+  ImportBatch,
+} from "@/lib/types";
 
 export default function DataManagementPage() {
   const { t, locale } = useI18n();
   const zh = locale === "zh";
   return (
     <div className="space-y-5">
-      <div><h1 className="text-2xl font-semibold">{zh ? "数据管理与恢复" : "Data Management & Recovery"}</h1><p className="text-sm text-muted-foreground">{zh ? "导入、审计、撤销、导出与数据库恢复" : "Import, audit, undo, export, and restore"}</p></div>
+      <div><h1 className="text-2xl font-semibold">{zh ? "数据管理与恢复" : "Data Management & Recovery"}</h1><p className="text-sm text-muted-foreground">{zh ? "导入、审计、补偿冲销、导出与数据库恢复" : "Import, audit, compensating reversals, export, and restore"}</p></div>
       <Tabs defaultValue="import">
         <TabsList className="mb-4 h-auto flex-wrap"><TabsTrigger value="import"><Upload className="h-4 w-4" />{zh ? "导入" : "Import"}</TabsTrigger><TabsTrigger value="history"><History className="h-4 w-4" />{zh ? "操作历史" : "Operation history"}</TabsTrigger><TabsTrigger value="backup"><ShieldCheck className="h-4 w-4" />{zh ? "导出与恢复" : "Export & restore"}</TabsTrigger></TabsList>
         <TabsContent value="import"><ImportPanel t={t} /></TabsContent>
@@ -72,8 +90,27 @@ function OperationHistory({ zh }: { zh: boolean }) {
   const [selected, setSelected] = useState<AgentOperationLog | null>(null);
   const logsQuery = useQuery({ queryKey: ["agent", "logs"], queryFn: () => api.get<AgentOperationLogPage>("/api/agent/logs?limit=200") });
   const undoMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/api/agent/logs/${id}/undo`),
-    onSuccess: () => { setSelected(null); ["agent", "portfolio", "transactions", "accounts", "instruments"].forEach((key) => queryClient.invalidateQueries({ queryKey: [key] })); toast.success(zh ? "操作已撤销" : "Operation undone"); },
+    mutationFn: (id: string) =>
+      api.post<AgentUndoResult>(`/api/agent/logs/${id}/undo`),
+    onSuccess: () => {
+      setSelected(null);
+      [
+        "agent",
+        "portfolio",
+        "transactions",
+        "accounts",
+        "instruments",
+        "owners",
+        "institutions",
+      ].forEach((key) =>
+        queryClient.invalidateQueries({ queryKey: [key] }),
+      );
+      toast.success(
+        zh
+          ? "补偿冲销事件已创建，原始记录与审计轨迹均已保留"
+          : "Compensating reversal events created; the original records and audit trail remain",
+      );
+    },
     onError: (error) => toast.error(error instanceof ApiError ? error.message : (zh ? "撤销失败" : "Undo failed")),
   });
   return (
@@ -96,6 +133,29 @@ function OperationHistory({ zh }: { zh: boolean }) {
               }
               className="min-w-[720px]"
             />
+          ) : logsQuery.isError ? (
+            <Alert variant="destructive">
+              <AlertTriangle />
+              <AlertTitle>
+                {zh ? "无法加载操作历史" : "Could not load operation history"}
+              </AlertTitle>
+              <AlertDescription>
+                {logsQuery.error instanceof ApiError
+                  ? logsQuery.error.message
+                  : zh
+                    ? "请检查网络连接后重试。"
+                    : "Check your connection and try again."}
+              </AlertDescription>
+              <AlertAction>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void logsQuery.refetch()}
+                >
+                  {zh ? "重试" : "Retry"}
+                </Button>
+              </AlertAction>
+            </Alert>
           ) : (
             <Table>
               <TableHeader>
@@ -128,7 +188,7 @@ function OperationHistory({ zh }: { zh: boolean }) {
                       </Badge>
                       {log.is_undone && (
                         <Badge variant="secondary" className="ml-1">
-                          {zh ? "已撤销" : "Undone"}
+                          {zh ? "已补偿" : "Compensated"}
                         </Badge>
                       )}
                     </TableCell>
@@ -139,23 +199,38 @@ function OperationHistory({ zh }: { zh: boolean }) {
                       {log.user_message}
                     </TableCell>
                     <TableCell className="whitespace-nowrap">
-                      +{log.change_summary.created} / ~
-                      {log.change_summary.updated} / −
-                      {log.change_summary.deleted}
+                      <div>
+                        +{log.change_summary.created} / ~
+                        {log.change_summary.updated} / −
+                        {log.change_summary.deleted}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {operationEventCount(log)}{" "}
+                        {zh ? "个账本事件" : "ledger events"}
+                        {operationResources(log).length > 0 &&
+                          ` · ${operationResources(log).join(", ")}`}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right">
-                      {log.operation_type === "tool_call" &&
-                      !log.is_undone ? (
+                      {log.is_undoable ? (
                         <Button
                           size="sm"
                           variant="outline"
                           onClick={() => setSelected(log)}
                         >
                           <RotateCcw className="h-3.5 w-3.5" />
-                          {zh ? "撤销" : "Undo"}
+                          {zh ? "补偿冲销" : "Compensate"}
                         </Button>
                       ) : (
-                        "-"
+                        <span className="text-xs text-muted-foreground">
+                          {log.is_undone
+                            ? zh
+                              ? "已补偿"
+                              : "Compensated"
+                            : zh
+                              ? "不可补偿"
+                              : "Not compensatable"}
+                        </span>
                       )}
                     </TableCell>
                   </TableRow>
@@ -182,11 +257,13 @@ function OperationHistory({ zh }: { zh: boolean }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{zh ? "确认撤销？" : "Confirm undo?"}</DialogTitle>
+            <DialogTitle>
+              {zh ? "创建补偿冲销事件？" : "Create compensating reversals?"}
+            </DialogTitle>
             <DialogDescription>
               {zh
-                ? "将只恢复该 Agent 工具调用产生的记录与字段。之后对同一持仓所做的更改可能产生冲突。"
-                : "Only records and fields changed by this agent tool call will be restored. Later changes to the same holding may conflict."}
+                ? "系统不会删除或改写历史数据，而是为本次 Agent 操作追加反向账本事件。原始事件和完整审计记录会保留，并据此重新计算当前持仓与现金。非账本类增删改不会被恢复。"
+                : "The system will not delete or rewrite history. It appends inverse ledger events for this agent operation, retains the originals and full audit trail, then recalculates current holdings and cash. Non-ledger CRUD is not restored."}
             </DialogDescription>
           </DialogHeader>
           {selected && (
@@ -197,6 +274,11 @@ function OperationHistory({ zh }: { zh: boolean }) {
                 {selected.change_summary.updated} / −
                 {selected.change_summary.deleted}
               </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {zh ? "将补偿" : "Will compensate"}{" "}
+                {operationEventCount(selected)}{" "}
+                {zh ? "个账本事件" : "ledger events"}
+              </div>
             </div>
           )}
           <DialogFooter>
@@ -205,25 +287,41 @@ function OperationHistory({ zh }: { zh: boolean }) {
             </Button>
             <Button
               onClick={() => selected && undoMutation.mutate(selected.id)}
-              disabled={undoMutation.isPending}
+              disabled={undoMutation.isPending || !selected?.is_undoable}
               aria-busy={undoMutation.isPending}
             >
               {undoMutation.isPending && (
-                <LoadingSpinner label={zh ? "正在撤销" : "Undoing"} />
+                <LoadingSpinner
+                  label={zh ? "正在创建冲销" : "Creating reversals"}
+                />
               )}
               {undoMutation.isPending
                 ? zh
-                  ? "撤销中…"
-                  : "Undoing…"
+                  ? "冲销中…"
+                  : "Creating…"
                 : zh
-                  ? "确认撤销"
-                  : "Undo"}
+                  ? "确认创建冲销"
+                  : "Create reversals"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </>
   );
+}
+
+function operationEventCount(log: AgentOperationLog): number {
+  return typeof log.summary.event_count === "number"
+    ? log.summary.event_count
+    : log.event_ids.length;
+}
+
+function operationResources(log: AgentOperationLog): string[] {
+  return Array.isArray(log.summary.resources)
+    ? log.summary.resources.filter(
+        (resource): resource is string => typeof resource === "string",
+      )
+    : [];
 }
 
 function BackupPanel({ zh }: { zh: boolean }) {

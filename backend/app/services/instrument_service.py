@@ -4,7 +4,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Instrument
+from app.core.family_scope import family_scoped_get
+from app.models import ExposureGroup, Instrument
 from app.schemas.instrument import InstrumentCreate, InstrumentUpdate
 
 
@@ -27,7 +28,7 @@ async def search_instruments(db: AsyncSession, query: str) -> list[Instrument]:
 
 
 async def get_instrument(db: AsyncSession, instrument_id: uuid.UUID) -> Instrument | None:
-    return await db.get(Instrument, instrument_id)
+    return await family_scoped_get(db, Instrument, instrument_id)
 
 
 async def create_instrument(
@@ -38,6 +39,11 @@ async def create_instrument(
     commit: bool = True,
 ) -> Instrument:
     values = data.model_dump()
+    exposure_group_id = values.get("exposure_group_id")
+    if exposure_group_id is not None and await family_scoped_get(
+        db, ExposureGroup, exposure_group_id
+    ) is None:
+        raise ValueError("exposure_group_not_found")
     if record_id is not None:
         values["id"] = record_id
     instrument = Instrument(**values)
@@ -57,10 +63,16 @@ async def update_instrument(
     *,
     commit: bool = True,
 ) -> Instrument | None:
-    instrument = await db.get(Instrument, instrument_id)
+    instrument = await family_scoped_get(db, Instrument, instrument_id)
     if instrument is None:
         return None
-    for field, value in data.model_dump(exclude_unset=True).items():
+    values = data.model_dump(exclude_unset=True)
+    exposure_group_id = values.get("exposure_group_id")
+    if exposure_group_id is not None and await family_scoped_get(
+        db, ExposureGroup, exposure_group_id
+    ) is None:
+        raise ValueError("exposure_group_not_found")
+    for field, value in values.items():
         setattr(instrument, field, value)
     if commit:
         await db.commit()
@@ -76,7 +88,7 @@ async def delete_instrument(
     *,
     commit: bool = True,
 ) -> bool:
-    instrument = await db.get(Instrument, instrument_id)
+    instrument = await family_scoped_get(db, Instrument, instrument_id)
     if instrument is None:
         return False
     await db.delete(instrument)

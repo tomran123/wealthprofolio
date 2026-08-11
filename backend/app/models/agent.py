@@ -5,10 +5,10 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, fun
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 
-class AgentSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class AgentSession(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     __tablename__ = "agent_sessions"
 
     title: Mapped[str] = mapped_column(String(160), nullable=False, default="New conversation")
@@ -30,7 +30,7 @@ class AgentSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class AgentMessage(UUIDPrimaryKeyMixin, Base):
+class AgentMessage(UUIDPrimaryKeyMixin, FamilyScopedMixin, Base):
     __tablename__ = "agent_messages"
 
     created_at: Mapped[datetime] = mapped_column(
@@ -53,7 +53,7 @@ class AgentMessage(UUIDPrimaryKeyMixin, Base):
     )
 
 
-class AgentPendingAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class AgentPendingAction(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """A server-side mutation plan waiting for an explicit UI confirmation."""
 
     __tablename__ = "agent_pending_actions"
@@ -71,6 +71,11 @@ class AgentPendingAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     turn_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_versions_json: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
     tool_calls_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     result_trace_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -88,7 +93,7 @@ class AgentPendingAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class AgentOperationLog(UUIDPrimaryKeyMixin, Base):
+class AgentOperationLog(UUIDPrimaryKeyMixin, FamilyScopedMixin, Base):
     __tablename__ = "agent_operation_logs"
 
     created_at: Mapped[datetime] = mapped_column(
@@ -104,6 +109,8 @@ class AgentOperationLog(UUIDPrimaryKeyMixin, Base):
     tool_calls_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     before_state_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     after_state_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    event_ids_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    summary_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     is_undone: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     linked_to_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -1,11 +1,11 @@
 from sqlalchemy import Boolean, Enum as SAEnum, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import LLMRole
 
 
-class LLMProviderConfig(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class LLMProviderConfig(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """Encrypted configuration for one OpenAI-compatible chat or vision endpoint."""
 
     __tablename__ = "llm_provider_configs"

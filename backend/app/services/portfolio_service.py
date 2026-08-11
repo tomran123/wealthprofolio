@@ -307,7 +307,6 @@ def summarize_valuations(
     holdings_count = 0
 
     for valuation in valuations:
-        holding = valuation.holding
         holdings_count += 1
         if not valuation.has_price:
             missing_price_count += 1

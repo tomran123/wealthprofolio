@@ -1,6 +1,16 @@
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,10 +22,11 @@ from app.agent.agent import (
     run_agent_turn,
 )
 from app.agent.extraction import ALLOWED_AGENT_MIME_TYPES, UploadedDocument
-from app.agent.state import summarize_diff
 from app.api.deps import get_current_user, get_db
 from app.core.config import get_settings
+from app.core.family_scope import get_bound_request_context
 from app.models import AgentOperationLog, AgentPendingAction, AgentSession
+from app.models.document import BackgroundJob
 from app.schemas.agent import (
     AgentChatRequest,
     AgentMessageRead,
@@ -27,9 +38,16 @@ from app.schemas.agent import (
     ChatMessage,
     UndoResult,
 )
-from app.services import agent_history_service, undo_service
+from app.schemas.document import BackgroundJobRead
+from app.services import agent_history_service, agent_job_service, undo_service
+from app.services.document_service import job_schema
 
 router = APIRouter(prefix="/api/agent", tags=["agent"], dependencies=[Depends(get_current_user)])
+jobs_router = APIRouter(
+    prefix="/api/v1/agent",
+    tags=["agent", "jobs"],
+    dependencies=[Depends(get_current_user)],
+)
 settings = get_settings()
 
 
@@ -50,6 +68,36 @@ def _session_schema(session: AgentSession, message_count: int) -> AgentSessionRe
 
 
 def _log_schema(log: AgentOperationLog) -> AgentOperationLogRead:
+    safe_calls = [
+        {
+            key: item.get(key)
+            for key in (
+                "id",
+                "tool",
+                "effect",
+                "resource",
+                "status",
+                "event_ids",
+            )
+            if item.get(key) is not None
+        }
+        for item in (log.tool_calls_json or [])
+        if isinstance(item, dict)
+    ]
+    summary = log.summary_json or {}
+    effects = summary.get("effects") if isinstance(summary, dict) else {}
+    effects = effects if isinstance(effects, dict) else {}
+    event_ids = [
+        uuid.UUID(str(value))
+        for value in (log.event_ids_json or [])
+    ]
+    compensatable = summary.get("compensatable")
+    if not isinstance(compensatable, bool):
+        non_compensatable_tools = {"delete_transaction", "reverse_transaction"}
+        compensatable = not any(
+            str(item.get("tool")) in non_compensatable_tools
+            for item in safe_calls
+        )
     return AgentOperationLogRead(
         id=log.id,
         created_at=log.created_at,
@@ -58,8 +106,20 @@ def _log_schema(log: AgentOperationLog) -> AgentOperationLogRead:
         operation_type=log.operation_type,
         user_message=log.user_message,
         description=log.description,
-        tool_calls=log.tool_calls_json,
-        change_summary=summarize_diff(log.before_state_json or {}, log.after_state_json or {}),
+        tool_calls=safe_calls,
+        change_summary={
+            "created": int(effects.get("create", 0)),
+            "updated": int(effects.get("update", 0)),
+            "deleted": int(effects.get("delete", 0)),
+        },
+        event_ids=event_ids,
+        summary=summary,
+        is_undoable=(
+            bool(event_ids)
+            and compensatable
+            and log.operation_type != "undo"
+            and not log.is_undone
+        ),
         is_undone=log.is_undone,
         undone_at=log.undone_at,
         linked_to_id=log.linked_to_id,
@@ -74,6 +134,44 @@ async def chat(payload: AgentChatRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404 if str(exc).endswith("_not_found") else 400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise _provider_error(exc) from exc
+
+
+@jobs_router.post(
+    "/jobs",
+    response_model=BackgroundJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_agent_job(
+    payload: AgentChatRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    context = get_bound_request_context(db)
+    if context is None:
+        raise HTTPException(status_code=401, detail="request_context_required")
+    job = BackgroundJob(
+        job_type="agent.run",
+        status="queued",
+        stage="queued",
+        progress=0,
+        message="Agent request queued",
+        input_json=payload.model_dump(mode="json"),
+        resource_type="agent_session",
+        resource_id=payload.session_id,
+        created_by_user_id=context.user_id,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    try:
+        agent_job_service.enqueue_agent_job(background_tasks, job)
+    except RuntimeError as exc:
+        job.status = "failed"
+        job.stage = "failed"
+        job.error = str(exc)
+        await db.commit()
+        raise _provider_error(exc) from exc
+    return job_schema(job)
 
 
 @router.post("/chat-with-files", response_model=AgentTurnResult)

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Plus, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -12,7 +12,12 @@ import {
 } from "@/components/loading-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -63,6 +68,14 @@ const FILTER_TYPES: Array<TransactionType | ""> = [
   "fee",
   "manual_adjustment",
   "valuation_update",
+  "opening_balance",
+  "reconciliation",
+  "tax",
+  "split",
+  "reverse_split",
+  "merger",
+  "stock_dividend",
+  "metadata_amended",
 ];
 
 const FORM_TYPES: FormType[] = [
@@ -103,7 +116,9 @@ export default function TransactionsPage() {
   const [filters, setFilters] = useState({ account: "", type: "", instrument: "", from: "", to: "" });
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState(initialForm);
-  const [pendingAction, setPendingAction] = useState<{ transaction: Transaction; action: "delete" | "reverse" } | null>(null);
+  const [pendingReversal, setPendingReversal] = useState<Transaction | null>(
+    null,
+  );
 
   const accountsQuery = useQuery({
     queryKey: ["accounts"],
@@ -148,16 +163,16 @@ export default function TransactionsPage() {
   });
 
   const actionMutation = useMutation({
-    mutationFn: async ({ transaction, action }: NonNullable<typeof pendingAction>) => {
-      if (action === "delete") return api.delete<void>(`/api/transactions/${transaction.id}`);
-      return api.post<TransactionMutationResult>(`/api/transactions/${transaction.id}/reverse`);
-    },
+    mutationFn: (transaction: Transaction) =>
+      api.post<TransactionMutationResult>(
+        `/api/transactions/${transaction.id}/reverse`,
+      ),
     onSuccess: () => {
       invalidate();
-      setPendingAction(null);
-      toast.success(zh ? "操作完成" : "Operation complete");
+      setPendingReversal(null);
+      toast.success(zh ? "冲销交易已创建" : "Reversal created");
     },
-    onError: () => toast.error(zh ? "操作失败" : "Operation failed"),
+    onError: () => toast.error(zh ? "冲销失败" : "Reversal failed"),
   });
 
   function createTransaction(): Promise<TransactionMutationResult> {
@@ -238,7 +253,7 @@ export default function TransactionsPage() {
   }
 
   const rows = transactionsQuery.data?.items ?? [];
-  const summaryCurrency = rows[0]?.currency ?? "USD";
+  const summaries = transactionsQuery.data?.summary.by_currency ?? [];
 
   return (
     <div className="space-y-5">
@@ -270,11 +285,63 @@ export default function TransactionsPage() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-3 sm:grid-cols-3">
-        <Summary label={zh ? "总买入" : "Total buys"} value={formatMoney(transactionsQuery.data?.summary.total_buy ?? 0, summaryCurrency)} />
-        <Summary label={zh ? "总卖出" : "Total sells"} value={formatMoney(transactionsQuery.data?.summary.total_sell ?? 0, summaryCurrency)} />
-        <Summary label={zh ? "净现金流（名义）" : "Net cash flow (nominal)"} value={formatMoney(transactionsQuery.data?.summary.net_cash_flow ?? 0, summaryCurrency)} />
-      </div>
+      {!transactionsQuery.isLoading && summaries.length > 0 && (
+        <section
+          className="space-y-3"
+          aria-labelledby="transaction-currency-summary"
+        >
+          <div>
+            <h2
+              id="transaction-currency-summary"
+              className="text-sm font-semibold"
+            >
+              {zh ? "按币种汇总" : "Summary by currency"}
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {zh
+                ? "每种币种独立计算，未做汇率换算，也不会跨币种相加。"
+                : "Each currency is calculated independently, without FX conversion or cross-currency totals."}
+            </p>
+          </div>
+          <div className="grid gap-3 xl:grid-cols-2">
+            {summaries.map((summary) => (
+              <Card key={summary.currency}>
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center justify-between text-base">
+                    {summary.currency}
+                    <Badge variant="outline">
+                      {zh ? "原币金额" : "Native currency"}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid gap-4 sm:grid-cols-3">
+                  <SummaryMetric
+                    label={zh ? "总买入" : "Total buys"}
+                    value={formatMoney(
+                      summary.total_buy,
+                      summary.currency,
+                    )}
+                  />
+                  <SummaryMetric
+                    label={zh ? "总卖出" : "Total sells"}
+                    value={formatMoney(
+                      summary.total_sell,
+                      summary.currency,
+                    )}
+                  />
+                  <SummaryMetric
+                    label={zh ? "净现金流" : "Net cash flow"}
+                    value={formatMoney(
+                      summary.net_cash_flow,
+                      summary.currency,
+                    )}
+                  />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
+      )}
 
       {transactionsQuery.isFetching && !transactionsQuery.isLoading && (
         <InlineLoading
@@ -320,8 +387,18 @@ export default function TransactionsPage() {
                   <TableCell className="max-w-48 truncate text-muted-foreground" title={transaction.note ?? undefined}>{transaction.note || "-"} · {transaction.source}</TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
-                      <Button variant="ghost" size="icon-sm" disabled={transaction.is_reversed} onClick={() => setPendingAction({ transaction, action: "reverse" })} title={zh ? "冲销" : "Reverse"}><RotateCcw className="h-4 w-4" /></Button>
-                      <Button variant="ghost" size="icon-sm" disabled={transaction.is_reversed || transaction.external_ref?.startsWith("reversal:")} onClick={() => setPendingAction({ transaction, action: "delete" })} title={zh ? "删除" : "Delete"}><Trash2 className="h-4 w-4" /></Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        disabled={
+                          transaction.is_reversed ||
+                          transaction.external_ref?.startsWith("reversal:")
+                        }
+                        onClick={() => setPendingReversal(transaction)}
+                        title={zh ? "创建冲销交易" : "Create reversal"}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                      </Button>
                     </div>
                   </TableCell>
                 </TableRow>
@@ -359,10 +436,39 @@ export default function TransactionsPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(pendingAction)} onOpenChange={(open) => !open && setPendingAction(null)}>
+      <Dialog open={Boolean(pendingReversal)} onOpenChange={(open) => !open && setPendingReversal(null)}>
         <DialogContent>
-          <DialogHeader><DialogTitle>{pendingAction?.action === "delete" ? (zh ? "删除交易？" : "Delete transaction?") : (zh ? "冲销交易？" : "Reverse transaction?")}</DialogTitle><DialogDescription>{pendingAction?.action === "delete" ? (zh ? "交易记录会被物理删除，相关持仓将回滚。" : "The row will be deleted and holding effects rolled back.") : (zh ? "系统会创建反向交易并保留完整审计记录。" : "Inverse entries will be created and the audit trail retained.")}</DialogDescription></DialogHeader>
-          <DialogFooter><Button variant="outline" onClick={() => setPendingAction(null)}>{zh ? "取消" : "Cancel"}</Button><Button variant={pendingAction?.action === "delete" ? "destructive" : "default"} onClick={() => pendingAction && actionMutation.mutate(pendingAction)} disabled={actionMutation.isPending} aria-busy={actionMutation.isPending}>{actionMutation.isPending && <LoadingSpinner label={zh ? "执行中" : "Applying action"} />}{actionMutation.isPending ? (zh ? "执行中…" : "Applying…") : (zh ? "确认" : "Confirm")}</Button></DialogFooter>
+          <DialogHeader>
+            <DialogTitle>{zh ? "冲销交易？" : "Reverse transaction?"}</DialogTitle>
+            <DialogDescription>
+              {zh
+                ? "系统会创建不可变的反向交易与复式分录，并保留完整审计记录；原交易不会被删除。"
+                : "An immutable inverse transaction and balanced postings will be created with a full audit trail; the original remains intact."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingReversal(null)}>
+              {zh ? "取消" : "Cancel"}
+            </Button>
+            <Button
+              onClick={() =>
+                pendingReversal && actionMutation.mutate(pendingReversal)
+              }
+              disabled={actionMutation.isPending}
+              aria-busy={actionMutation.isPending}
+            >
+              {actionMutation.isPending && (
+                <LoadingSpinner label={zh ? "执行中" : "Applying reversal"} />
+              )}
+              {actionMutation.isPending
+                ? zh
+                  ? "冲销中…"
+                  : "Reversing…"
+                : zh
+                  ? "确认冲销"
+                  : "Confirm reversal"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
@@ -391,5 +497,5 @@ function TransactionForm({ form, setForm, accounts, instruments, zh }: { form: t
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <div className="space-y-1.5"><Label>{label}</Label>{children}</div>; }
 function NativeSelect({ value, onChange, children }: { value: string; onChange: (value: string) => void; children: React.ReactNode }) { return <select value={value} onChange={(event) => onChange(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm outline-none focus:border-ring focus:ring-2 focus:ring-ring/40">{children}</select>; }
-function Summary({ label, value }: { label: string; value: string }) { return <Card><CardContent className="pt-6"><div className="text-sm text-muted-foreground">{label}</div><div className="mt-1 text-xl font-semibold">{value}</div></CardContent></Card>; }
-function typeLabel(type: string, zh: boolean) { const labels: Record<string, [string, string]> = { buy: ["买入", "Buy"], sell: ["卖出", "Sell"], deposit: ["存入", "Deposit"], withdraw: ["取出", "Withdraw"], transfer: ["内部转账", "Transfer"], transfer_in: ["转入", "Transfer in"], transfer_out: ["转出", "Transfer out"], fx_exchange: ["换汇", "FX exchange"], dividend: ["分红", "Dividend"], interest: ["利息", "Interest"], fee: ["手续费", "Fee"], manual_adjustment: ["人工调整", "Manual adjustment"], valuation_update: ["估值更新", "Valuation update"] }; return labels[type]?.[zh ? 0 : 1] ?? type; }
+function SummaryMetric({ label, value }: { label: string; value: string }) { return <div><div className="text-xs text-muted-foreground">{label}</div><div className="mt-1 text-lg font-semibold">{value}</div></div>; }
+function typeLabel(type: string, zh: boolean) { const labels: Record<string, [string, string]> = { buy: ["买入", "Buy"], sell: ["卖出", "Sell"], deposit: ["存入", "Deposit"], withdraw: ["取出", "Withdraw"], transfer: ["内部转账", "Transfer"], transfer_in: ["转入", "Transfer in"], transfer_out: ["转出", "Transfer out"], fx_exchange: ["换汇", "FX exchange"], dividend: ["分红", "Dividend"], interest: ["利息", "Interest"], fee: ["手续费", "Fee"], manual_adjustment: ["人工调整", "Manual adjustment"], valuation_update: ["估值更新", "Valuation update"], opening_balance: ["期初余额", "Opening balance"], reconciliation: ["对账调整", "Reconciliation"], tax: ["税费", "Tax"], split: ["拆股", "Stock split"], reverse_split: ["并股", "Reverse split"], merger: ["合并", "Merger"], stock_dividend: ["股票股息", "Stock dividend"], metadata_amended: ["元数据更正", "Metadata amended"] }; return labels[type]?.[zh ? 0 : 1] ?? type; }

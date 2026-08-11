@@ -9,9 +9,11 @@ from sqlalchemy.orm import selectinload
 
 from app.agent.state import json_value
 from app.core.config import get_settings
-from app.models import Account, ExposureGroup, Holding, Institution, Instrument, Owner
+from app.core.family_scope import family_scoped_get
+from app.models import Account, ExposureGroup, Holding, Institution, Owner
 from app.models.enums import HoldingSource, TransactionSource, TransactionType
 from app.schemas.account import AccountCreate, AccountUpdate
+from app.schemas.document import KnowledgeFilters
 from app.schemas.exposure_group import ExposureGroupCreate, ExposureGroupUpdate
 from app.schemas.institution import InstitutionCreate, InstitutionUpdate
 from app.schemas.instrument import InstrumentCreate, InstrumentUpdate
@@ -29,10 +31,12 @@ from app.schemas.transaction import (
 )
 from app.services import (
     account_service,
+    document_draft_service,
     exposure_group_service,
     holding_service,
     institution_service,
     instrument_service,
+    knowledge_service,
     market_instrument_service,
     market_price_history_service,
     owner_service,
@@ -342,6 +346,42 @@ TOOL_SCHEMAS = [
         ["instrument_id", "as_of"],
         resource="market_quote",
     ),
+    # Private family document knowledge. Every service applies the bound family scope.
+    _tool(
+        "search_documents",
+        "Search indexed family documents with hybrid full-text/vector retrieval and page citations.",
+        {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "document_ids": {"type": "array", "items": ID, "maxItems": 100},
+            "document_types": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+            "date_from": DATE,
+            "date_to": DATE,
+            "institution_id": ID,
+            "account_id": ID,
+        },
+        ["query"],
+        resource="document_chunk",
+    ),
+    _tool(
+        "retrieve_document_chunks",
+        "Retrieve indexed chunks from one family document with exact page citations.",
+        {
+            "document_id": ID,
+            "page_number": {"type": "integer", "minimum": 1},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        ["document_id"],
+        resource="document_chunk",
+    ),
+    _tool(
+        "draft_transactions_from_document",
+        "Create a review-only transaction draft from a processed document. This never posts ledger entries.",
+        {"document_id": ID},
+        ["document_id"],
+        effect="create",
+        resource="document_extraction",
+    ),
     # Exposure groups
     _tool("list_exposure_groups", "List all underlying exposure groups.", {}, [], resource="exposure_group"),
     _tool(
@@ -385,7 +425,7 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "set_holding_snapshot",
-        "Set an exact current holding only for initialization or reconciliation. Prefer ledger transactions for normal changes.",
+        "Create a reconciliation event that brings a holding projection to an exact quantity.",
         {"account_id": ID, "instrument_id": ID, "quantity": NUMBER},
         ["account_id", "instrument_id", "quantity"],
         effect="update",
@@ -393,7 +433,7 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "adjust_holding",
-        "Add a signed quantity delta only for reconciliation. Prefer create_manual_adjustment for auditable changes.",
+        "Create an auditable reconciliation event with a signed quantity delta.",
         {"account_id": ID, "instrument_id": ID, "delta_quantity": NUMBER},
         ["account_id", "instrument_id", "delta_quantity"],
         effect="update",
@@ -401,10 +441,10 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "delete_holding",
-        "Delete a materialized holding snapshot. This does not delete ledger transactions.",
+        "Reconcile a holding projection to zero; no holding or ledger row is deleted.",
         {"holding_id": ID},
         ["holding_id"],
-        effect="delete",
+        effect="update",
         resource="holding",
     ),
     # Transaction reads
@@ -579,7 +619,7 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "update_transaction_metadata",
-        "Update only non-economic transaction metadata. To change quantity, price, account, currency, or fees, reverse/delete and recreate.",
+        "Append a metadata-amended event. To change economic fields, reverse and recreate.",
         {
             "transaction_id": ID,
             "trade_date": DATE,
@@ -594,10 +634,10 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "delete_transaction",
-        "Physically delete a ledger entry and roll back its holding effects. Use only when explicitly requested.",
+        "Compatibility command that appends reversal events; posted ledger rows are never deleted.",
         {"transaction_id": ID},
         ["transaction_id"],
-        effect="delete",
+        effect="create",
         resource="transaction",
     ),
     _tool(
@@ -627,6 +667,20 @@ TOOL_SCHEMAS = [
     _tool(
         "set_manual_valuation",
         "Create a manual valuation snapshot for an instrument.",
+        {
+            "instrument_id": ID,
+            "price": NUMBER,
+            "currency": CURRENCY,
+            "as_of": DATETIME,
+            "note": {"type": "string"},
+        },
+        ["instrument_id", "price", "currency"],
+        effect="create",
+        resource="price_snapshot",
+    ),
+    _tool(
+        "create_price_snapshot",
+        "Create a point-in-time manual price snapshot; this does not alter a holding.",
         {
             "instrument_id": ID,
             "price": NUMBER,
@@ -730,6 +784,9 @@ def prepare_pending_tool_call(
     if not tool_requires_confirmation(name):
         raise ValueError("read_tool_cannot_be_staged")
     stored_args = dict(args)
+    # Persist one opaque retry token with the staged command. Confirmation can
+    # then be retried safely after an ambiguous transport or worker failure.
+    stored_args["_idempotency_key"] = f"agent:{confirmation_id}:{uuid.uuid4()}"
     preview: dict[str, Any] = {
         "status": "pending_confirmation",
         "confirmation_id": str(confirmation_id),
@@ -777,6 +834,7 @@ async def dispatch_tool(
 ) -> Any:
     args = dict(args)
     record_id = _uuid(args.pop("_record_id")) if args.get("_record_id") else None
+    idempotency_key = args.pop("_idempotency_key", None)
 
     # Read-only tools.
     if name == "list_owners":
@@ -856,10 +914,23 @@ async def dispatch_tool(
                 _datetime(args["as_of"]),
             )
         )
+    if name == "search_documents":
+        query = str(args.pop("query"))
+        filters = KnowledgeFilters.model_validate(args)
+        return (
+            await knowledge_service.search_knowledge(db, query, filters)
+        ).model_dump(mode="json")
+    if name == "retrieve_document_chunks":
+        return await knowledge_service.retrieve_document_chunks(
+            db,
+            _uuid(args["document_id"]),
+            page_number=int(args["page_number"]) if args.get("page_number") else None,
+            limit=int(args.get("limit", 20)),
+        )
     if name == "list_exposure_groups":
         return _result(await exposure_group_service.list_exposure_groups(db))
     if name == "get_exposure_group":
-        row = await db.get(ExposureGroup, _uuid(args["exposure_group_id"]))
+        row = await family_scoped_get(db, ExposureGroup, _uuid(args["exposure_group_id"]))
         if row is None:
             raise ValueError("exposure_group_not_found")
         return _result(row)
@@ -916,6 +987,13 @@ async def dispatch_tool(
                 commit=commit,
             )
         )
+    if name == "draft_transactions_from_document":
+        draft = await document_draft_service.create_transaction_draft(
+            db,
+            _uuid(args["document_id"]),
+            commit=commit,
+        )
+        return document_draft_service.draft_schema(draft).model_dump(mode="json")
     if name == "update_owner":
         owner_id = _uuid(args.pop("owner_id"))
         row = await owner_service.update_owner(db, owner_id, OwnerUpdate(**args), commit=commit)
@@ -1037,6 +1115,7 @@ async def dispatch_tool(
             Decimal(str(args["quantity"])),
             HoldingSource.AGENT,
             commit=commit,
+            idempotency_key=idempotency_key,
         )
         return _result(row)
     if name == "adjust_holding":
@@ -1047,12 +1126,22 @@ async def dispatch_tool(
             Decimal(str(args["delta_quantity"])),
             HoldingSource.AGENT,
             commit=commit,
+            idempotency_key=idempotency_key,
         )
         return _result(row)
     if name == "delete_holding":
-        if not await holding_service.delete_holding(db, _uuid(args["holding_id"]), commit=commit):
-            raise ValueError("holding_not_found")
-        return {"deleted_id": str(args["holding_id"])}
+        row = await holding_service.reconcile_holding_to_zero(
+            db,
+            _uuid(args["holding_id"]),
+            HoldingSource.AGENT,
+            commit=commit,
+            idempotency_key=idempotency_key,
+        )
+        return {
+            "reconciled_holding_id": str(row.id),
+            "quantity": str(row.quantity),
+            "event_ids": [str(row.last_event_id)] if row.last_event_id else [],
+        }
     if name in ("create_buy_transaction", "create_sell_transaction"):
         payload_data = {
             **args,
@@ -1065,12 +1154,14 @@ async def dispatch_tool(
                 db,
                 BuyTransactionCreate(**payload_data),
                 commit=commit,
+                idempotency_key=idempotency_key,
             )
         else:
             tx = await transaction_service.create_sell_transaction(
                 db,
                 SellTransactionCreate(**payload_data),
                 commit=commit,
+                idempotency_key=idempotency_key,
             )
         return _result(tx)
     if name == "create_transfer":
@@ -1086,7 +1177,14 @@ async def dispatch_tool(
                 "executed_at": _datetime(args.get("executed_at")),
             }
         )
-        return _result(await transaction_service.create_transfer(db, payload, commit=commit))
+        return _result(
+            await transaction_service.create_transfer(
+                db,
+                payload,
+                commit=commit,
+                idempotency_key=idempotency_key,
+            )
+        )
     if name == "create_currency_exchange":
         payload = FXExchangeCreate(
             **{
@@ -1096,7 +1194,14 @@ async def dispatch_tool(
                 "executed_at": _datetime(args.get("executed_at")),
             }
         )
-        return _result(await transaction_service.create_currency_exchange(db, payload, commit=commit))
+        return _result(
+            await transaction_service.create_currency_exchange(
+                db,
+                payload,
+                commit=commit,
+                idempotency_key=idempotency_key,
+            )
+        )
     if name == "create_income_transaction":
         payload = IncomeTransactionCreate(
             **{
@@ -1106,7 +1211,14 @@ async def dispatch_tool(
                 "executed_at": _datetime(args.get("executed_at")),
             }
         )
-        return _result(await transaction_service.create_income_transaction(db, payload, commit=commit))
+        return _result(
+            await transaction_service.create_income_transaction(
+                db,
+                payload,
+                commit=commit,
+                idempotency_key=idempotency_key,
+            )
+        )
     if name == "create_fee_transaction":
         payload = FeeTransactionCreate(
             **{
@@ -1116,7 +1228,14 @@ async def dispatch_tool(
                 "executed_at": _datetime(args.get("executed_at")),
             }
         )
-        return _result(await transaction_service.create_fee_transaction(db, payload, commit=commit))
+        return _result(
+            await transaction_service.create_fee_transaction(
+                db,
+                payload,
+                commit=commit,
+                idempotency_key=idempotency_key,
+            )
+        )
     if name == "create_cash_transaction":
         payload = CashTransactionCreate(
             **{
@@ -1126,7 +1245,14 @@ async def dispatch_tool(
                 "executed_at": _datetime(args.get("executed_at")),
             }
         )
-        return _result(await transaction_service.create_cash_transaction(db, payload, commit=commit))
+        return _result(
+            await transaction_service.create_cash_transaction(
+                db,
+                payload,
+                commit=commit,
+                idempotency_key=idempotency_key,
+            )
+        )
     if name == "create_manual_adjustment":
         payload = ManualAdjustmentCreate(
             **{
@@ -1136,7 +1262,14 @@ async def dispatch_tool(
                 "executed_at": _datetime(args.get("executed_at")),
             }
         )
-        return _result(await transaction_service.create_manual_adjustment(db, payload, commit=commit))
+        return _result(
+            await transaction_service.create_manual_adjustment(
+                db,
+                payload,
+                commit=commit,
+                idempotency_key=idempotency_key,
+            )
+        )
     if name == "update_transaction_metadata":
         transaction_id = _uuid(args.pop("transaction_id"))
         rows = await transaction_service.update_transaction_metadata(
@@ -1144,16 +1277,18 @@ async def dispatch_tool(
             transaction_id,
             TransactionMetadataUpdate(**args),
             commit=commit,
+            idempotency_key=idempotency_key,
         )
         return _result(rows)
     if name == "delete_transaction":
         return {
-            "deleted_ids": [
+            "reversal_event_ids": [
                 str(value)
                 for value in await transaction_service.delete_transaction(
                     db,
                     _uuid(args["transaction_id"]),
                     commit=commit,
+                    idempotency_key=idempotency_key,
                 )
             ]
         }
@@ -1163,6 +1298,7 @@ async def dispatch_tool(
                 db,
                 _uuid(args["transaction_id"]),
                 commit=commit,
+                idempotency_key=idempotency_key,
             )
         )
     if name == "set_cash_balance":
@@ -1172,22 +1308,20 @@ async def dispatch_tool(
         await transaction_service._require_account(db, account_id)
         cash = await transaction_service._cash_instrument(db, currency)
         holding = await holding_service.get_holding(db, account_id, cash.id)
-        previous_balance = holding.quantity if holding is not None else Decimal("0")
+        previous_balance = holding.quantity if holding is not None else Decimal(0)
         adjustment = target_balance - previous_balance
-        transaction = await transaction_service.create_manual_adjustment(
+        transaction = await transaction_service.create_reconciliation_transaction(
             db,
-            ManualAdjustmentCreate(
-                account_id=account_id,
-                instrument_id=cash.id,
-                delta_quantity=adjustment,
-                currency=currency,
-                trade_date=_date(args.get("trade_date")),
-                executed_at=_datetime(args.get("executed_at")),
-                note=args.get("note")
-                or f"Cash balance reconciliation: {previous_balance} -> {target_balance} {currency}",
-                source=TransactionSource.AGENT,
-            ),
+            account_id,
+            cash.id,
+            currency,
+            TransactionSource.AGENT,
+            target_quantity=target_balance,
             commit=commit,
+            idempotency_key=idempotency_key,
+            metadata={"compatibility_command": "agent set_cash_balance"},
+            note=args.get("note")
+            or f"Cash balance reconciled to {target_balance} {currency}",
         )
         return {
             "account_id": str(account_id),
@@ -1198,7 +1332,7 @@ async def dispatch_tool(
             "adjustment": str(adjustment),
             "transaction": _result(transaction),
         }
-    if name == "set_manual_valuation":
+    if name in ("set_manual_valuation", "create_price_snapshot"):
         await transaction_service._require_instrument(db, _uuid(args["instrument_id"]))
         row = await valuation_service.set_manual_valuation(
             db,

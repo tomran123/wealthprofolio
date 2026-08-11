@@ -1,11 +1,16 @@
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Enum as SAEnum, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import InstitutionType
 
+if TYPE_CHECKING:
+    from app.models.account import Account
 
-class Institution(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+
+class Institution(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """A bank, broker, or other custodian holding accounts."""
 
     __tablename__ = "institutions"

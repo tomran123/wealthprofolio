@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -8,12 +10,19 @@ from time import monotonic
 from typing import Any
 
 import jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.family_scope import family_scoped_get, require_bound_family_id
+from app.core.redis_state import redis_get, redis_set
 from app.models import Account, Holding, Instrument, PriceSnapshot
-from app.models.enums import HoldingSource, PriceSourceType
+from app.models.enums import (
+    AssetClass,
+    MarketRegion,
+    PriceSourceType,
+    TransactionSource,
+)
 from app.providers.price.akshare_adapter import AkSharePriceAdapter
 from app.providers.price.coingecko_adapter import CoinGeckoPriceAdapter
 from app.providers.price.instrument_search import (
@@ -26,7 +35,7 @@ from app.providers.price.manual_adapter import ManualPriceAdapter
 from app.providers.price.price_router import route_to_adapters
 from app.providers.price.yahoo_adapter import YahooPriceAdapter
 from app.schemas.holding import MarketHoldingCreateRequest
-from app.services import instrument_service, valuation_service
+from app.services import instrument_service, transaction_service, valuation_service
 
 settings = get_settings()
 TOKEN_SCOPE = "market-instrument-selection"
@@ -53,6 +62,80 @@ _SEARCH_CACHE: OrderedDict[str, tuple[float, _ExternalSearchResult]] = OrderedDi
 _SEARCH_INFLIGHT: dict[str, asyncio.Task[_ExternalSearchResult]] = {}
 
 
+def _search_cache_key(query: str) -> str:
+    digest = hashlib.sha256(query.casefold().encode("utf-8")).hexdigest()
+    return f"wealthportfolio:market-search:v1:{digest}"
+
+
+def _serialize_external_search(result: _ExternalSearchResult) -> str:
+    return json.dumps(
+        {
+            "source_results": [
+                [
+                    {
+                        "provider": candidate.provider,
+                        "provider_symbol": candidate.provider_symbol,
+                        "symbol": candidate.symbol,
+                        "name": candidate.name,
+                        "asset_class": candidate.asset_class.value,
+                        "currency": candidate.currency,
+                        "market": candidate.market.value,
+                        "country": candidate.country,
+                        "exchange": candidate.exchange,
+                        "external_ids": candidate.external_ids,
+                    }
+                    for candidate in source
+                ]
+                for source in result.source_results
+            ],
+            "unavailable_sources": list(result.unavailable_sources),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _deserialize_external_search(value: str) -> _ExternalSearchResult:
+    payload = json.loads(value)
+    return _ExternalSearchResult(
+        source_results=tuple(
+            tuple(
+                InstrumentSearchCandidate(
+                    provider=str(candidate["provider"]),
+                    provider_symbol=str(candidate["provider_symbol"]),
+                    symbol=str(candidate["symbol"]),
+                    name=str(candidate["name"]),
+                    asset_class=AssetClass(str(candidate["asset_class"])),
+                    currency=str(candidate["currency"]),
+                    market=MarketRegion(str(candidate["market"])),
+                    country=(
+                        str(candidate["country"])
+                        if candidate.get("country")
+                        else None
+                    ),
+                    exchange=(
+                        str(candidate["exchange"])
+                        if candidate.get("exchange")
+                        else None
+                    ),
+                    external_ids={
+                        str(key): str(item)
+                        for key, item in dict(
+                            candidate.get("external_ids") or {}
+                        ).items()
+                    },
+                )
+                for candidate in source
+            )
+            for source in payload["source_results"]
+        ),
+        unavailable_sources=tuple(
+            str(source) for source in payload["unavailable_sources"]
+        ),
+    )
+
+
 async def _run_external_search(query: str) -> _ExternalSearchResult:
     async def search_one(adapter: Any) -> tuple[tuple[InstrumentSearchCandidate, ...], bool]:
         try:
@@ -77,14 +160,25 @@ async def _run_external_search(query: str) -> _ExternalSearchResult:
 
 async def _get_external_search(query: str) -> _ExternalSearchResult:
     cache_key = query.casefold()
+    distributed_key = _search_cache_key(query)
+    redis_available, distributed_value = await redis_get(distributed_key)
+    if distributed_value is not None:
+        try:
+            return _deserialize_external_search(distributed_value)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            # A schema/version mismatch is a miss. The versioned key prevents
+            # this in normal releases, while keeping corrupt cache data inert.
+            pass
+
     now = monotonic()
-    cached = _SEARCH_CACHE.get(cache_key)
-    if cached is not None:
-        expires_at, result = cached
-        if expires_at > now:
-            _SEARCH_CACHE.move_to_end(cache_key)
-            return result
-        _SEARCH_CACHE.pop(cache_key, None)
+    if not redis_available:
+        cached = _SEARCH_CACHE.get(cache_key)
+        if cached is not None:
+            expires_at, result = cached
+            if expires_at > now:
+                _SEARCH_CACHE.move_to_end(cache_key)
+                return result
+            _SEARCH_CACHE.pop(cache_key, None)
 
     task = _SEARCH_INFLIGHT.get(cache_key)
     if task is None:
@@ -101,10 +195,16 @@ async def _get_external_search(query: str) -> _ExternalSearchResult:
         if result.unavailable_sources
         else SEARCH_CACHE_TTL_SECONDS
     )
-    _SEARCH_CACHE[cache_key] = (monotonic() + ttl, result)
-    _SEARCH_CACHE.move_to_end(cache_key)
-    while len(_SEARCH_CACHE) > SEARCH_CACHE_MAX_ENTRIES:
-        _SEARCH_CACHE.popitem(last=False)
+    stored_distributed = await redis_set(
+        distributed_key,
+        _serialize_external_search(result),
+        ttl_seconds=ttl,
+    )
+    if not stored_distributed:
+        _SEARCH_CACHE[cache_key] = (monotonic() + ttl, result)
+        _SEARCH_CACHE.move_to_end(cache_key)
+        while len(_SEARCH_CACHE) > SEARCH_CACHE_MAX_ENTRIES:
+            _SEARCH_CACHE.popitem(last=False)
     return result
 
 
@@ -217,8 +317,6 @@ async def search_market_instruments(db: AsyncSession, query: str) -> dict[str, A
 
 def _candidate_from_payload(payload: dict[str, Any]) -> InstrumentSearchCandidate:
     try:
-        from app.models.enums import AssetClass, MarketRegion
-
         external_ids = {
             str(key): str(value)
             for key, value in dict(payload.get("external_ids") or {}).items()
@@ -297,9 +395,73 @@ async def _find_existing_instrument(db: AsyncSession, candidate: InstrumentSearc
     return next((row for row in rows if row.price_source_type == PriceSourceType.MARKET), None)
 
 
-async def add_holding_from_market_search(db: AsyncSession, data: MarketHoldingCreateRequest) -> dict[str, Any]:
+def _market_holding_result(
+    data: MarketHoldingCreateRequest,
+    holding: Holding,
+    instrument: Instrument,
+    quote: Any,
+) -> dict[str, Any]:
+    quote_status = (
+        quote.quote_status.value
+        if hasattr(quote.quote_status, "value")
+        else str(quote.quote_status)
+    )
+    return {
+        "holding": {
+            "id": holding.id,
+            "account_id": holding.account_id,
+            "instrument_id": holding.instrument_id,
+            "quantity": holding.quantity,
+            "source": holding.source,
+            "projection_version": holding.projection_version,
+            "last_event_id": holding.last_event_id,
+            "instrument_name": instrument.name,
+            "instrument_symbol": instrument.symbol,
+            "price_source_type": instrument.price_source_type,
+        },
+        "price": quote.price,
+        "currency": quote.currency.upper(),
+        "market_value": data.quantity * Decimal(quote.price),
+        "quote_status": quote_status,
+        "price_as_of": quote.as_of.isoformat(),
+        "source_provider": quote.source_provider,
+    }
+
+
+async def add_holding_from_market_search(
+    db: AsyncSession,
+    data: MarketHoldingCreateRequest,
+    *,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    fingerprint = transaction_service._command_fingerprint(
+        "market_holding",
+        data.model_dump(mode="json"),
+    )
+    existing = await transaction_service._existing_transaction(
+        db,
+        idempotency_key,
+        fingerprint,
+    )
+    if existing is not None:
+        if existing.instrument_id is None:
+            raise RuntimeError("idempotent_market_holding_instrument_missing")
+        instrument = await family_scoped_get(db, Instrument, existing.instrument_id)
+        holding = (
+            await db.execute(
+                select(Holding).where(
+                    Holding.account_id == existing.account_id,
+                    Holding.instrument_id == existing.instrument_id,
+                )
+            )
+        ).scalar_one_or_none()
+        quote = await valuation_service.get_latest_price(db, existing.instrument_id)
+        if instrument is None or holding is None or quote is None:
+            raise RuntimeError("idempotent_market_holding_projection_missing")
+        return _market_holding_result(data, holding, instrument, quote)
+
     payload = _decode_selection_token(data.selection_token)
-    account = await db.get(Account, data.account_id)
+    account = await family_scoped_get(db, Account, data.account_id)
     if account is None:
         raise ValueError("account_not_found")
 
@@ -307,7 +469,9 @@ async def add_holding_from_market_search(db: AsyncSession, data: MarketHoldingCr
     quote_is_new = False
     if local_id:
         try:
-            instrument = await db.get(Instrument, uuid.UUID(str(local_id)))
+            instrument = await family_scoped_get(
+                db, Instrument, uuid.UUID(str(local_id))
+            )
         except ValueError as exc:
             raise ValueError("invalid_market_selection") from exc
         if instrument is None or instrument.price_source_type != PriceSourceType.MARKET:
@@ -316,6 +480,21 @@ async def add_holding_from_market_search(db: AsyncSession, data: MarketHoldingCr
     else:
         candidate = _candidate_from_payload(payload)
         quote = await _fetch_quote(candidate)
+        family_id = require_bound_family_id(db)
+        instrument_identity = (
+            f"{family_id}:{candidate.provider}:{candidate.provider_symbol}:"
+            f"{candidate.symbol}:{candidate.market.value}"
+        )
+        await db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(
+                        f"market-instrument:{instrument_identity}",
+                        0,
+                    )
+                )
+            )
+        )
         instrument = await _find_existing_instrument(db, candidate)
         if instrument is None:
             instrument = Instrument(
@@ -350,45 +529,53 @@ async def add_holding_from_market_search(db: AsyncSession, data: MarketHoldingCr
                 )
             )
 
-        holding_stmt = (
-            select(Holding)
-            .where(Holding.account_id == data.account_id, Holding.instrument_id == instrument.id)
-            .with_for_update()
-        )
-        holding = (await db.execute(holding_stmt)).scalar_one_or_none()
-        if holding is None:
-            holding = Holding(
-                account_id=data.account_id,
-                instrument_id=instrument.id,
-                quantity=data.quantity,
-                source=HoldingSource.MANUAL,
+        holding = (
+            await db.execute(
+                select(Holding)
+                .where(
+                    Holding.account_id == data.account_id,
+                    Holding.instrument_id == instrument.id,
+                )
+                .with_for_update()
             )
-            db.add(holding)
+        ).scalar_one_or_none()
+        if holding is None:
+            await transaction_service.create_opening_balance(
+                db,
+                data.account_id,
+                instrument.id,
+                data.quantity,
+                quote.currency,
+                TransactionSource.MANUAL,
+                commit=False,
+                idempotency_key=idempotency_key,
+                idempotency_fingerprint_override=fingerprint,
+                metadata={"origin": "market_search"},
+            )
         else:
-            holding.quantity = data.quantity
-            holding.source = HoldingSource.MANUAL
+            await transaction_service.create_reconciliation_transaction(
+                db,
+                data.account_id,
+                instrument.id,
+                quote.currency,
+                TransactionSource.MANUAL,
+                target_quantity=data.quantity,
+                commit=False,
+                idempotency_key=idempotency_key,
+                idempotency_fingerprint_override=fingerprint,
+                metadata={"origin": "market_search"},
+            )
         await db.commit()
-        await db.refresh(holding)
+        holding = (
+            await db.execute(
+                select(Holding).where(
+                    Holding.account_id == data.account_id,
+                    Holding.instrument_id == instrument.id,
+                )
+            )
+        ).scalar_one()
     except Exception:
         await db.rollback()
         raise
 
-    quote_status = quote.quote_status.value if hasattr(quote.quote_status, "value") else str(quote.quote_status)
-    return {
-        "holding": {
-            "id": holding.id,
-            "account_id": holding.account_id,
-            "instrument_id": holding.instrument_id,
-            "quantity": holding.quantity,
-            "source": holding.source,
-            "instrument_name": instrument.name,
-            "instrument_symbol": instrument.symbol,
-            "price_source_type": instrument.price_source_type,
-        },
-        "price": quote.price,
-        "currency": quote.currency.upper(),
-        "market_value": data.quantity * Decimal(quote.price),
-        "quote_status": quote_status,
-        "price_as_of": quote.as_of.isoformat(),
-        "source_provider": quote.source_provider,
-    }
+    return _market_holding_result(data, holding, instrument, quote)

@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.family_scope import family_scoped_get
 from app.models import AgentMessage, AgentOperationLog, AgentSession
 
 
@@ -24,7 +25,7 @@ async def list_sessions(db: AsyncSession, limit: int = 100) -> list[tuple[AgentS
 async def get_session_detail(
     db: AsyncSession, session_id: uuid.UUID
 ) -> tuple[AgentSession, list[AgentMessage]] | None:
-    session = await db.get(AgentSession, session_id)
+    session = await family_scoped_get(db, AgentSession, session_id)
     if session is None:
         return None
     stmt = (

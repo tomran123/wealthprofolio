@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   Database,
+  FileText,
   FileImage,
   Paperclip,
   Plus,
@@ -18,7 +19,8 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -45,6 +47,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import {
+  BackgroundJobFailedError,
+  BackgroundJobTimeoutError,
+  type BackgroundJobTransport,
+  waitForBackgroundJob,
+} from "@/lib/jobs";
 import type {
   AgentSession,
   AgentSessionDetail,
@@ -52,6 +60,7 @@ import type {
   AgentPendingToolCall,
   AgentToolTrace,
   AgentTurnResult,
+  BackgroundJob,
   LLMProvider,
 } from "@/lib/types";
 
@@ -62,6 +71,10 @@ interface LocalMessage {
   files?: string[];
   pendingAction?: AgentPendingAction | null;
 }
+
+type AgentMutationRequest =
+  | { kind: "send"; text: string; attached: File[] }
+  | { kind: "resume"; job: BackgroundJob<AgentTurnResult> };
 
 const PROVIDER_PRESETS = {
   openai: {
@@ -109,6 +122,22 @@ function createProviderSetup(providerKey: ProviderKey = "openai"): ProviderSetup
   };
 }
 
+function isAgentTurnResult(value: unknown): value is AgentTurnResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const result = value as Partial<AgentTurnResult>;
+  return (
+    typeof result.session_id === "string" &&
+    typeof result.assistant_message === "string" &&
+    Array.isArray(result.tool_call_trace) &&
+    Array.isArray(result.extracted_documents) &&
+    (result.pending_action === null ||
+      typeof result.pending_action === "object")
+  );
+}
+
 export default function AgentPage() {
   const { locale } = useI18n();
   const zh = locale === "zh";
@@ -118,8 +147,22 @@ export default function AgentPage() {
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  const [activeJob, setActiveJob] =
+    useState<BackgroundJob<AgentTurnResult> | null>(null);
+  const [jobTransport, setJobTransport] =
+    useState<BackgroundJobTransport | null>(null);
+  const [timedOutJob, setTimedOutJob] =
+    useState<BackgroundJob<AgentTurnResult> | null>(null);
+  const jobTrackingController = useRef<AbortController | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openingSessionId, setOpeningSessionId] = useState<string | null>(null);
+
+  useEffect(
+    () => () => {
+      jobTrackingController.current?.abort();
+    },
+    [],
+  );
 
   const sessionsQuery = useQuery({
     queryKey: ["agent", "sessions"],
@@ -139,43 +182,52 @@ export default function AgentPage() {
     },
     onError: (error) => toast.error(error instanceof ApiError ? error.message : (zh ? "模型切换失败" : "Failed to switch model")),
   });
-  const openSession = async (nextSessionId: string) => {
-    setOpeningSessionId(nextSessionId);
-    try {
-      const detail = await queryClient.fetchQuery({
-        queryKey: ["agent", "session", nextSessionId],
-        queryFn: () =>
-          api.get<AgentSessionDetail>(
-            `/api/agent/sessions/${nextSessionId}`,
-          ),
-      });
-      setSessionId(nextSessionId);
-      setMessages(
-        detail.messages.map((message) => ({
-          role: message.role,
-          content: message.content,
-          trace: message.tool_trace,
-          files: message.attachments.map((attachment) =>
-            String(attachment.filename ?? "file"),
-          ),
-          pendingAction: message.pending_action,
-        })),
-      );
-    } catch (error) {
-      const detail = error instanceof ApiError ? error.message : "";
-      toast.error(
-        detail || (zh ? "加载历史对话失败" : "Failed to load conversation"),
-      );
-    } finally {
-      setOpeningSessionId(null);
-    }
-  };
-
   const sendMutation = useMutation({
-    mutationFn: async ({ text, attached }: { text: string; attached: File[] }) => {
+    onMutate: (request: AgentMutationRequest) => {
+      if (request.kind === "resume") {
+        setTimedOutJob(null);
+        setActiveJob(request.job);
+      }
+    },
+    mutationFn: async (request: AgentMutationRequest) => {
+      if (request.kind === "resume") {
+        const controller = new AbortController();
+        jobTrackingController.current = controller;
+        const completed = await waitForBackgroundJob(request.job, {
+          onUpdate: setActiveJob,
+          onTransportChange: setJobTransport,
+          timeoutMs: 10 * 60 * 1000,
+          signal: controller.signal,
+        });
+        if (!isAgentTurnResult(completed.result)) {
+          throw new Error("invalid_agent_job_result");
+        }
+        return completed.result;
+      }
+
+      const { text, attached } = request;
       const payloadMessages = [...messages, { role: "user" as const, content: text }].map(({ role, content }) => ({ role, content }));
       if (attached.length === 0) {
-        return api.post<AgentTurnResult>("/api/agent/chat", { messages: payloadMessages, session_id: sessionId });
+        const controller = new AbortController();
+        jobTrackingController.current = controller;
+        const queued = await api.post<BackgroundJob<AgentTurnResult>>(
+          "/api/v1/agent/jobs",
+          {
+            messages: payloadMessages,
+            session_id: sessionId,
+          },
+        );
+        setActiveJob(queued);
+        const completed = await waitForBackgroundJob(queued, {
+          onUpdate: setActiveJob,
+          onTransportChange: setJobTransport,
+          timeoutMs: 10 * 60 * 1000,
+          signal: controller.signal,
+        });
+        if (!isAgentTurnResult(completed.result)) {
+          throw new Error("invalid_agent_job_result");
+        }
+        return completed.result;
       }
       const formData = new FormData();
       formData.append("messages", JSON.stringify(payloadMessages));
@@ -192,11 +244,45 @@ export default function AgentPage() {
       }]);
       setSessionId(result.session_id);
       setFiles([]);
+      setTimedOutJob(null);
       queryClient.invalidateQueries({ queryKey: ["agent", "sessions"] });
     },
     onError: (error) => {
+      if (error instanceof BackgroundJobTimeoutError) {
+        setTimedOutJob(error.lastJob);
+        queryClient.invalidateQueries({ queryKey: ["agent", "sessions"] });
+        toast.warning(
+          zh
+            ? "等待已超时，但服务器任务可能仍在运行。请稍后在历史对话中查看，避免立即重复发送。"
+            : "Waiting timed out, but the server job may still be running. Check conversation history shortly and avoid sending a duplicate.",
+        );
+        return;
+      }
+      if (error instanceof BackgroundJobFailedError) {
+        toast.error(
+          zh
+            ? `Agent 后台任务失败${error.job.error ? `：${error.job.error}` : ""}`
+            : `Agent background job failed${error.job.error ? `: ${error.job.error}` : ""}`,
+        );
+        return;
+      }
       const detail = error instanceof ApiError ? error.message : "";
-      toast.error(detail || (zh ? "Agent 请求失败" : "Agent request failed"));
+      toast.error(
+        detail ||
+          (error instanceof Error &&
+          error.message === "invalid_agent_job_result"
+            ? zh
+              ? "Agent 返回了无法识别的结果，请刷新历史对话后重试"
+              : "The agent returned an invalid result. Refresh conversation history before retrying."
+            : zh
+              ? "Agent 请求失败"
+              : "Agent request failed"),
+      );
+    },
+    onSettled: () => {
+      jobTrackingController.current = null;
+      setActiveJob(null);
+      setJobTransport(null);
     },
   });
 
@@ -229,9 +315,51 @@ export default function AgentPage() {
     },
   });
 
+  const conversationBusy =
+    sendMutation.isPending ||
+    resolvePendingMutation.isPending ||
+    activateModelMutation.isPending ||
+    openingSessionId !== null ||
+    timedOutJob !== null;
+
+  const openSession = async (nextSessionId: string) => {
+    if (conversationBusy || openingSessionId !== null) {
+      return;
+    }
+    setOpeningSessionId(nextSessionId);
+    try {
+      const detail = await queryClient.fetchQuery({
+        queryKey: ["agent", "session", nextSessionId],
+        queryFn: () =>
+          api.get<AgentSessionDetail>(
+            `/api/agent/sessions/${nextSessionId}`,
+          ),
+      });
+      setSessionId(nextSessionId);
+      setMessages(
+        detail.messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          trace: message.tool_trace,
+          files: message.attachments.map((attachment) =>
+            String(attachment.filename ?? "file"),
+          ),
+          pendingAction: message.pending_action,
+        })),
+      );
+    } catch (error) {
+      const detail = error instanceof ApiError ? error.message : "";
+      toast.error(
+        detail || (zh ? "加载历史对话失败" : "Failed to load conversation"),
+      );
+    } finally {
+      setOpeningSessionId(null);
+    }
+  };
+
   const send = () => {
     const text = input.trim();
-    if (!text || sendMutation.isPending) return;
+    if (!text || conversationBusy) return;
     const attached = [...files];
     setMessages((old) => [
       ...old.map((message) =>
@@ -242,10 +370,13 @@ export default function AgentPage() {
       { role: "user", content: text, files: attached.map((file) => file.name) },
     ]);
     setInput("");
-    sendMutation.mutate({ text, attached });
+    sendMutation.mutate({ kind: "send", text, attached });
   };
 
   const newConversation = () => {
+    if (conversationBusy) {
+      return;
+    }
     setOpeningSessionId(null);
     setSessionId(null);
     setMessages([]);
@@ -263,15 +394,15 @@ export default function AgentPage() {
   return (
     <div
       className="space-y-4"
-      aria-busy={sendMutation.isPending || openingSessionId !== null}
+      aria-busy={conversationBusy}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">AI Agent</h1>
           <p className="text-sm text-muted-foreground">
             {zh
-              ? "用中文、截图或 PDF 管理资产和交易"
-              : "Manage assets and transactions with chat, images, or PDFs"}
+              ? "文字对话会作为后台任务运行；报表、截图和 PDF 请优先交给文档中心处理"
+              : "Text chats run as background jobs; use the document center for statements, screenshots, and PDFs"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -289,7 +420,9 @@ export default function AgentPage() {
                     activateModelMutation.mutate(event.target.value);
                   }
                 }}
-                disabled={activateModelMutation.isPending}
+                disabled={
+                  activateModelMutation.isPending || conversationBusy
+                }
                 aria-label={zh ? "选择聊天模型" : "Choose chat model"}
                 aria-busy={activateModelMutation.isPending}
                 className="h-9 max-w-56 rounded-lg border bg-background px-3 text-sm font-medium"
@@ -315,16 +448,28 @@ export default function AgentPage() {
               )}
             </div>
           ) : (
-            <Button variant="outline" onClick={() => setSettingsOpen(true)}>
+            <Button
+              variant="outline"
+              onClick={() => setSettingsOpen(true)}
+              disabled={conversationBusy}
+            >
               <Bot className="h-4 w-4" />
               {zh ? "选择模型" : "Choose model"}
             </Button>
           )}
-          <Button variant="outline" onClick={newConversation}>
+          <Button
+            variant="outline"
+            onClick={newConversation}
+            disabled={conversationBusy}
+          >
             <Plus className="h-4 w-4" />
             {zh ? "新对话" : "New chat"}
           </Button>
-          <Button variant="outline" onClick={() => setSettingsOpen(true)}>
+          <Button
+            variant="outline"
+            onClick={() => setSettingsOpen(true)}
+            disabled={conversationBusy}
+          >
             <Settings2 className="h-4 w-4" />
             {zh ? "LLM 设置" : "LLM settings"}
           </Button>
@@ -355,7 +500,9 @@ export default function AgentPage() {
                     key={session.id}
                     type="button"
                     onClick={() => void openSession(session.id)}
-                    disabled={openingSessionId !== null}
+                    disabled={
+                      openingSessionId !== null || conversationBusy
+                    }
                     aria-busy={isOpening}
                     className={`w-full rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:cursor-wait disabled:opacity-70 ${
                       isActive
@@ -401,7 +548,7 @@ export default function AgentPage() {
             <div
               className="flex-1 space-y-5 overflow-y-auto rounded-lg border bg-muted/20 p-4 sm:p-5"
               aria-busy={
-                sendMutation.isPending || openingSessionId !== null
+                conversationBusy
               }
             >
               {openingSessionId && (
@@ -423,9 +570,18 @@ export default function AgentPage() {
                     </div>
                     <div className="mt-1 max-w-lg text-sm">
                       {zh
-                        ? "例如：7 月 21 日上午 11 点，在 Morgan Stanley 以每股 $685 买入 800 股 SPY，owner 是王晓丽，无手续费；或上传券商持仓截图。"
+                        ? "例如：7 月 21 日上午 11 点，在 Morgan Stanley 以每股 $685 买入 800 股 SPY，owner 是王晓丽，无手续费。"
                         : "For example: At 11:00 on July 21, I bought 800 SPY at $685 per share at Morgan Stanley for owner Wang Xiaoli, with no fee."}
                     </div>
+                    <Button
+                      className="mt-3"
+                      size="sm"
+                      variant="outline"
+                      render={<Link href="/documents" />}
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                      {zh ? "处理报表或截图" : "Process a statement or image"}
+                    </Button>
                   </div>
                 </div>
               )}
@@ -439,12 +595,66 @@ export default function AgentPage() {
                     resolvePendingMutation.variables?.actionId ===
                       message.pendingAction?.id
                   }
-                  onResolve={(actionId, decision) =>
-                    resolvePendingMutation.mutate({ actionId, decision })
-                  }
+                  interactionLocked={conversationBusy}
+                  onResolve={(actionId, decision) => {
+                    if (!conversationBusy) {
+                      resolvePendingMutation.mutate({ actionId, decision });
+                    }
+                  }}
                 />
               ))}
-              {sendMutation.isPending && <AgentThinking zh={zh} />}
+              {sendMutation.isPending && (
+                <AgentThinking
+                  zh={zh}
+                  job={activeJob}
+                  transport={jobTransport}
+                />
+              )}
+              {timedOutJob && !sendMutation.isPending && (
+                <div
+                  role="alert"
+                  className="space-y-3 rounded-xl border border-amber-400/60 bg-amber-500/5 p-4 text-sm"
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
+                    <div>
+                      <div className="font-medium">
+                        {zh
+                          ? "Agent 任务仍可能在服务器运行"
+                          : "The agent job may still be running"}
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {zh
+                          ? `任务 ${timedOutJob.id.slice(0, 8)}… 等待超时。可继续跟踪同一任务，避免重复提交。`
+                          : `Job ${timedOutJob.id.slice(0, 8)}… timed out while waiting. Resume the same job to avoid a duplicate submission.`}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setTimedOutJob(null);
+                        setActiveJob(null);
+                      }}
+                    >
+                      {zh ? "稍后从历史查看" : "Check history later"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        sendMutation.mutate({
+                          kind: "resume",
+                          job: timedOutJob,
+                        })
+                      }
+                    >
+                      {zh ? "继续等待" : "Resume tracking"}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {files.length > 0 && (
@@ -459,6 +669,7 @@ export default function AgentPage() {
                     {file.name}
                     <button
                       type="button"
+                      disabled={conversationBusy}
                       onClick={() =>
                         setFiles((old) =>
                           old.filter(
@@ -480,7 +691,7 @@ export default function AgentPage() {
                 size="icon"
                 onClick={() => fileInputRef.current?.click()}
                 title={zh ? "上传图片或 PDF" : "Upload image or PDF"}
-                disabled={sendMutation.isPending}
+                disabled={conversationBusy}
               >
                 <Paperclip className="h-4 w-4" />
               </Button>
@@ -511,13 +722,13 @@ export default function AgentPage() {
                     : "Type a message. Enter to send, Shift+Enter for a new line"
                 }
                 className="min-h-20 flex-1"
-                disabled={sendMutation.isPending}
+                disabled={conversationBusy}
               />
               <Button
                 size="icon"
                 onClick={send}
-                disabled={!input.trim() || sendMutation.isPending}
-                aria-busy={sendMutation.isPending}
+                disabled={!input.trim() || conversationBusy}
+                aria-busy={conversationBusy}
                 aria-label={zh ? "发送消息" : "Send message"}
               >
                 {sendMutation.isPending ? (
@@ -529,6 +740,18 @@ export default function AgentPage() {
                 )}
               </Button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              {zh
+                ? "此处附件仅用于一次性兼容分析。需要稳定 OCR、页级预览、引用和可重试处理时，请使用"
+                : "Attachments here are for one-off compatibility analysis. For durable OCR, page previews, citations, and retryable processing, use the"}{" "}
+              <Link
+                href="/documents"
+                className="font-medium text-primary underline underline-offset-4"
+              >
+                {zh ? "文档中心" : "document center"}
+              </Link>
+              {zh ? "。" : "."}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -753,10 +976,21 @@ function AgentMarkdown({ content }: { content: string }) {
   );
 }
 
-function AgentThinking({ zh }: { zh: boolean }) {
-  const label = zh
-    ? "正在查询并准备变更清单…"
-    : "Querying data and preparing a change plan…";
+function AgentThinking({
+  zh,
+  job,
+  transport,
+}: {
+  zh: boolean;
+  job: BackgroundJob<AgentTurnResult> | null;
+  transport: BackgroundJobTransport | null;
+}) {
+  const progress = Math.max(0, Math.min(job?.progress ?? 0, 100));
+  const label =
+    job?.message ??
+    (zh
+      ? "正在查询并准备变更清单…"
+      : "Querying data and preparing a change plan…");
   return (
     <div className="flex items-start gap-3">
       <div className="mt-1 rounded-full bg-primary p-2 text-primary-foreground shadow-sm">
@@ -770,7 +1004,47 @@ function AgentThinking({ zh }: { zh: boolean }) {
         <div className="flex items-center gap-2 text-sm font-medium">
           <LoadingSpinner label={label} />
           <span>{label}</span>
+          {job && (
+            <span className="ml-auto text-xs text-muted-foreground">
+              {progress}%
+            </span>
+          )}
         </div>
+        {(job?.stage || transport) && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {job?.stage && (
+              <Badge variant="outline">
+                {job.stage.replaceAll("_", " ")}
+              </Badge>
+            )}
+            {transport && (
+              <Badge variant="secondary">
+                {transport === "websocket"
+                  ? zh
+                    ? "实时更新"
+                    : "Live updates"
+                  : transport === "polling"
+                    ? zh
+                      ? "轮询更新"
+                      : "Polling"
+                    : zh
+                      ? "正在连接"
+                      : "Connecting"}
+              </Badge>
+            )}
+          </div>
+        )}
+        {job && (
+          <div
+            className="h-1.5 overflow-hidden rounded-full bg-muted"
+            aria-label={`${progress}%`}
+          >
+            <div
+              className="h-full bg-primary transition-[width]"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        )}
         <div aria-hidden="true" className="space-y-2">
           <Skeleton className="h-3 w-5/6" />
           <Skeleton className="h-3 w-2/3" />
@@ -784,11 +1058,13 @@ function MessageBubble({
   message,
   zh,
   resolving,
+  interactionLocked,
   onResolve,
 }: {
   message: LocalMessage;
   zh: boolean;
   resolving: boolean;
+  interactionLocked: boolean;
   onResolve: (actionId: string, decision: "confirm" | "cancel") => void;
 }) {
   const isUser = message.role === "user";
@@ -827,6 +1103,7 @@ function MessageBubble({
             pending={message.pendingAction}
             zh={zh}
             resolving={resolving}
+            interactionLocked={interactionLocked}
             onResolve={onResolve}
           />
         )}
@@ -847,11 +1124,13 @@ function PendingActionCard({
   pending,
   zh,
   resolving,
+  interactionLocked,
   onResolve,
 }: {
   pending: AgentPendingAction;
   zh: boolean;
   resolving: boolean;
+  interactionLocked: boolean;
   onResolve: (actionId: string, decision: "confirm" | "cancel") => void;
 }) {
   const destructive = pending.tool_calls.some(
@@ -987,7 +1266,7 @@ function PendingActionCard({
             <Button
               size="sm"
               variant="outline"
-              disabled={resolving}
+              disabled={resolving || interactionLocked}
               onClick={() => onResolve(pending.id, "cancel")}
             >
               <X className="h-3.5 w-3.5" />
@@ -996,7 +1275,7 @@ function PendingActionCard({
             <Button
               size="sm"
               variant={destructive ? "destructive" : "default"}
-              disabled={resolving}
+              disabled={resolving || interactionLocked}
               aria-busy={resolving}
               onClick={() => onResolve(pending.id, "confirm")}
             >
@@ -1023,7 +1302,7 @@ function PendingActionCard({
             <Button
               size="sm"
               variant={destructive ? "destructive" : "default"}
-              disabled={resolving}
+              disabled={resolving || interactionLocked}
               aria-busy={resolving}
               onClick={() => onResolve(pending.id, "confirm")}
             >

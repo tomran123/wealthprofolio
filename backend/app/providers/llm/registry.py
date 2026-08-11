@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.encryption import ENVELOPE_PREFIX, decrypt_secret, encrypt_secret
 from app.models import LLMProviderConfig
 from app.models.enums import LLMRole
 from app.providers.llm.client import LLMClient
@@ -19,11 +20,17 @@ def _fernet() -> Fernet:
         raise RuntimeError("llm_encryption_key_invalid") from exc
 
 
-def encrypt_api_key(api_key: str) -> str:
-    return _fernet().encrypt(api_key.encode("utf-8")).decode("utf-8")
+async def encrypt_api_key(api_key: str) -> str:
+    """Encrypt new values with the versioned AES-256-GCM envelope."""
+
+    return await encrypt_secret(api_key, purpose="llm-api-key")
 
 
-def decrypt_api_key(encrypted: str) -> str:
+async def decrypt_api_key(encrypted: str) -> str:
+    if encrypted.startswith(ENVELOPE_PREFIX):
+        return await decrypt_secret(encrypted, purpose="llm-api-key")
+    # Existing Fernet ciphertext remains readable during the staged migration.
+    # No new secret is written in this format.
     try:
         return _fernet().decrypt(encrypted.encode("utf-8")).decode("utf-8")
     except InvalidToken as exc:
@@ -45,7 +52,7 @@ async def get_active_client(db: AsyncSession, role: LLMRole) -> LLMClient:
     if provider is None:
         raise RuntimeError(f"active_{role.value}_provider_not_configured")
     return LLMClient(
-        api_key=decrypt_api_key(provider.api_key_encrypted),
+        api_key=await decrypt_api_key(provider.api_key_encrypted),
         base_url=provider.base_url,
         model_name=provider.model_name,
     )
