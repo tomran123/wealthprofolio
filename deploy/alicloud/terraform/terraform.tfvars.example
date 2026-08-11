@@ -1,0 +1,49 @@
+region        = "cn-hangzhou"
+project_name  = "wealthprofolio"
+namespace_slug = "wealthprofolio-prod"
+
+# Existing account resources. Replace every example ID after reviewing cost,
+# region availability, network boundaries, backups, and deletion protection.
+vpc_id            = "vpc-REPLACE"
+vswitch_id        = "vsw-REPLACE"
+security_group_id = "sg-REPLACE"
+
+migration_database_role = "wp_migration_owner"
+runtime_database_role   = "wp_runtime"
+
+backend_image_url = "registry-vpc.cn-hangzhou.aliyuncs.com/REPLACE/wealthprofolio-backend:RELEASE_SHA"
+frontend_image_url = ""
+backend_internal_url = ""
+
+sae_secret_name = "wealthprofolio-prod-runtime"
+sae_secret_id   = 0
+
+cors_origins = ["https://wealth.example.com"]
+
+kms_key_id         = "key-REPLACE"
+kms_endpoint       = ""
+oss_endpoint        = "oss-cn-hangzhou-internal.aliyuncs.com"
+oss_public_endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+oss_bucket          = "REPLACE-private-bucket"
+
+# The API should stay private behind this CLB. It may be left empty when a
+# separately managed SAE Gateway route provides the private endpoint.
+api_intranet_slb_id = "lb-REPLACE"
+
+# Production must provide clamd. Mirror a pinned image to ACR before enabling.
+enable_clamav_sae       = false
+clamav_image_url        = "registry-vpc.cn-hangzhou.aliyuncs.com/REPLACE/clamav:1.4.3"
+clamav_intranet_slb_id  = "lb-REPLACE"
+external_clamav_host    = ""
+
+# First apply: create only the namespace.
+enable_runtime  = false
+enable_frontend = false
+
+# Enable only after a dedicated FC custom-container image is integrated with
+# the document pipeline. Terraform intentionally has no placeholder handler.
+enable_fc_ocr       = false
+fc_ocr_image_url    = ""
+fc_ocr_role_arn     = ""
+fc_sls_project      = ""
+fc_sls_logstore     = ""

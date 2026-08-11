@@ -1,14 +1,21 @@
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum as SAEnum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import AccountType
 
+if TYPE_CHECKING:
+    from app.models.holding import Holding
+    from app.models.institution import Institution
+    from app.models.owner import Owner
+    from app.models.transaction import Transaction
 
-class Account(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+
+class Account(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """A specific account at an institution, owned by one family Owner."""
 
     __tablename__ = "accounts"
@@ -33,3 +40,4 @@ class Account(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     holdings: Mapped[list["Holding"]] = relationship(
         "Holding", back_populates="account", cascade="all, delete-orphan"
     )
+    transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="account")

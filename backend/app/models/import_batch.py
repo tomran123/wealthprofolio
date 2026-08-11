@@ -2,11 +2,11 @@ from sqlalchemy import Enum as SAEnum, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import ImportBatchStatus
 
 
-class ImportBatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class ImportBatch(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """A CSV/Excel upload: parsed rows + match results are cached here so the user can
     preview the outcome before committing it to the database."""
 

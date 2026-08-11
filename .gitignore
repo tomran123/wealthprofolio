@@ -5,8 +5,17 @@
 
 # Secrets / environment
 .env
+backups/*
+!backups/.gitkeep
 backend/.env
 frontend/.env.local
+
+# Local Terraform state and real cloud inputs
+deploy/alicloud/terraform/.terraform/
+deploy/alicloud/terraform/*.tfstate
+deploy/alicloud/terraform/*.tfstate.*
+deploy/alicloud/terraform/*.tfvars
+!deploy/alicloud/terraform/terraform.tfvars.example
 
 # Python
 backend/.venv/
@@ -21,4 +30,3 @@ frontend/next-env.d.ts
 
 # Uploaded user data (screenshots, photos) - added in a later phase
 backend/uploads/
-

@@ -68,3 +68,38 @@ class ImportBatchStatus(str, enum.Enum):
     PENDING = "pending"
     COMMITTED = "committed"
     FAILED = "failed"
+
+
+class TransactionType(str, enum.Enum):
+    BUY = "buy"
+    SELL = "sell"
+    DEPOSIT = "deposit"
+    WITHDRAW = "withdraw"
+    TRANSFER_IN = "transfer_in"
+    TRANSFER_OUT = "transfer_out"
+    FX_EXCHANGE = "fx_exchange"
+    DIVIDEND = "dividend"
+    INTEREST = "interest"
+    FEE = "fee"
+    MANUAL_ADJUSTMENT = "manual_adjustment"
+    VALUATION_UPDATE = "valuation_update"
+    OPENING_BALANCE = "opening_balance"
+    RECONCILIATION = "reconciliation"
+    TAX = "tax"
+    SPLIT = "split"
+    REVERSE_SPLIT = "reverse_split"
+    MERGER = "merger"
+    STOCK_DIVIDEND = "stock_dividend"
+    METADATA_AMENDED = "metadata_amended"
+
+
+class TransactionSource(str, enum.Enum):
+    MANUAL = "manual"
+    IMPORT = "import"
+    AGENT = "agent"
+    SCREENSHOT = "screenshot"
+
+
+class LLMRole(str, enum.Enum):
+    CHAT = "chat"
+    VISION = "vision"

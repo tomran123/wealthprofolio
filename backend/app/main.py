@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.core.csrf import CSRFMiddleware, SecurityHeadersMiddleware
 from app.core.db import AsyncSessionLocal
 from app.services.auth_service import ensure_initial_user
 
@@ -20,6 +21,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="WealthPortfolio API", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(
+    CSRFMiddleware,
+    allowed_origins=settings.cors_origins,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

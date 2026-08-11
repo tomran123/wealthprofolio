@@ -3,6 +3,8 @@ from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
+from app.core import audit as _audit  # noqa: F401  (register append-only audit)
+from app.core import family_scope as _family_scope  # noqa: F401  (register session guards)
 
 settings = get_settings()
 

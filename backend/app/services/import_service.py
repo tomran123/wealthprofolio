@@ -7,9 +7,10 @@ from rapidfuzz import fuzz
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Account, ImportBatch, Institution, Instrument, Owner
-from app.models.enums import AssetClass, HoldingSource, ImportBatchStatus, PriceSourceType
-from app.services import holding_service, valuation_service
+from app.core.family_scope import family_scoped_get
+from app.models import Account, Holding, ImportBatch, Institution, Instrument, Owner
+from app.models.enums import AssetClass, ImportBatchStatus, PriceSourceType, TransactionSource
+from app.services import transaction_service, valuation_service
 
 TEMPLATE_COLUMNS = [
     "Owner",
@@ -166,7 +167,7 @@ async def parse_and_preview(db: AsyncSession, filename: str, content: bytes) -> 
 
 
 async def get_batch(db: AsyncSession, batch_id: uuid.UUID) -> ImportBatch | None:
-    return await db.get(ImportBatch, batch_id)
+    return await family_scoped_get(db, ImportBatch, batch_id)
 
 
 async def _get_or_create_owner(db: AsyncSession, cache: dict[str, uuid.UUID], name: str) -> uuid.UUID:
@@ -191,18 +192,19 @@ async def _get_or_create_institution(db: AsyncSession, cache: dict[str, uuid.UUI
 
 async def _get_or_create_account(
     db: AsyncSession,
-    cache: dict[str, uuid.UUID],
+    cache: dict[tuple[str, uuid.UUID, uuid.UUID], uuid.UUID],
     name: str,
     institution_id: uuid.UUID,
     owner_id: uuid.UUID,
     currency: str,
 ) -> uuid.UUID:
-    if name in cache:
-        return cache[name]
+    key = (name.casefold(), institution_id, owner_id)
+    if key in cache:
+        return cache[key]
     account = Account(name=name, institution_id=institution_id, owner_id=owner_id, base_currency=currency or "USD")
     db.add(account)
     await db.flush()
-    cache[name] = account.id
+    cache[key] = account.id
     return account.id
 
 
@@ -233,7 +235,11 @@ async def _get_or_create_instrument(
 
 
 async def commit_batch(db: AsyncSession, batch_id: uuid.UUID) -> ImportBatch:
-    batch = await db.get(ImportBatch, batch_id)
+    batch = (
+        await db.execute(
+            select(ImportBatch).where(ImportBatch.id == batch_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if batch is None:
         raise ValueError("batch_not_found")
     if batch.status == ImportBatchStatus.COMMITTED:
@@ -242,59 +248,115 @@ async def commit_batch(db: AsyncSession, batch_id: uuid.UUID) -> ImportBatch:
     rows: list[dict] = batch.parsed_rows.get("rows", [])
     owner_cache: dict[str, uuid.UUID] = {}
     institution_cache: dict[str, uuid.UUID] = {}
-    account_cache: dict[str, uuid.UUID] = {}
+    account_cache: dict[tuple[str, uuid.UUID, uuid.UUID], uuid.UUID] = {}
     instrument_cache: dict[str, uuid.UUID] = {}
 
-    for row in rows:
-        if row.get("errors"):
-            continue
+    try:
+        for row in rows:
+            if row.get("errors"):
+                continue
 
-        owner_id = (
-            uuid.UUID(row["owner_id"])
-            if row.get("owner_id")
-            else await _get_or_create_owner(db, owner_cache, row["owner_name"] or "Unassigned")
-        )
-        institution_id = (
-            uuid.UUID(row["institution_id"])
-            if row.get("institution_id")
-            else await _get_or_create_institution(db, institution_cache, row["institution_name"] or "Unknown")
-        )
-        account_id = (
-            uuid.UUID(row["account_id"])
-            if row.get("account_id")
-            else await _get_or_create_account(
-                db, account_cache, row["account_name"], institution_id, owner_id, row.get("currency") or "USD"
-            )
-        )
-        instrument_key = row.get("ticker") or row["instrument_name"]
-        instrument_id = (
-            uuid.UUID(row["instrument_id"])
-            if row.get("instrument_id")
-            else await _get_or_create_instrument(
-                db,
-                instrument_cache,
-                instrument_key,
-                row["instrument_name"],
-                row.get("ticker"),
-                row.get("asset_type", ""),
-                row.get("currency") or "USD",
-            )
-        )
-
-        quantity = Decimal(row["quantity"]) if row.get("quantity") else Decimal("0")
-        await holding_service.adjust_holding(db, account_id, instrument_id, quantity, source=HoldingSource.IMPORT)
-
-        current_price = row.get("current_price")
-        if current_price:
-            try:
-                price_value = Decimal(current_price)
-                await valuation_service.set_manual_valuation(
-                    db, instrument_id, price_value, row.get("currency") or "USD", note="csv_import"
+            owner_id = (
+                uuid.UUID(row["owner_id"])
+                if row.get("owner_id")
+                else await _get_or_create_owner(
+                    db, owner_cache, row["owner_name"] or "Unassigned"
                 )
-            except InvalidOperation:
-                pass
+            )
+            institution_id = (
+                uuid.UUID(row["institution_id"])
+                if row.get("institution_id")
+                else await _get_or_create_institution(
+                    db,
+                    institution_cache,
+                    row["institution_name"] or "Unknown",
+                )
+            )
+            account_id = (
+                uuid.UUID(row["account_id"])
+                if row.get("account_id")
+                else await _get_or_create_account(
+                    db,
+                    account_cache,
+                    row["account_name"],
+                    institution_id,
+                    owner_id,
+                    row.get("currency") or "USD",
+                )
+            )
+            instrument_key = row.get("ticker") or row["instrument_name"]
+            instrument_id = (
+                uuid.UUID(row["instrument_id"])
+                if row.get("instrument_id")
+                else await _get_or_create_instrument(
+                    db,
+                    instrument_cache,
+                    instrument_key,
+                    row["instrument_name"],
+                    row.get("ticker"),
+                    row.get("asset_type", ""),
+                    row.get("currency") or "USD",
+                )
+            )
 
-    batch.status = ImportBatchStatus.COMMITTED
-    await db.commit()
-    await db.refresh(batch)
-    return batch
+            quantity = Decimal(row["quantity"]) if row.get("quantity") else Decimal("0")
+            existing_holding = (
+                await db.execute(
+                    select(Holding).where(
+                        Holding.account_id == account_id,
+                        Holding.instrument_id == instrument_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            event_key = f"import:{batch.id}:row:{row['row_index']}"
+            event_metadata = {
+                "import_batch_id": str(batch.id),
+                "row_index": row["row_index"],
+            }
+            if existing_holding is None:
+                await transaction_service.create_opening_balance(
+                    db,
+                    account_id,
+                    instrument_id,
+                    quantity,
+                    row.get("currency") or "USD",
+                    TransactionSource.IMPORT,
+                    commit=False,
+                    idempotency_key=event_key,
+                    metadata=event_metadata,
+                )
+            else:
+                await transaction_service.create_reconciliation_transaction(
+                    db,
+                    account_id,
+                    instrument_id,
+                    row.get("currency") or "USD",
+                    TransactionSource.IMPORT,
+                    target_quantity=quantity,
+                    commit=False,
+                    idempotency_key=event_key,
+                    metadata=event_metadata,
+                )
+
+            current_price = row.get("current_price")
+            if current_price:
+                try:
+                    price_value = Decimal(current_price)
+                    await valuation_service.set_manual_valuation(
+                        db,
+                        instrument_id,
+                        price_value,
+                        row.get("currency") or "USD",
+                        note="csv_import",
+                        commit=False,
+                    )
+                except InvalidOperation:
+                    pass
+
+        batch.status = ImportBatchStatus.COMMITTED
+        await db.commit()
+        await db.refresh(batch)
+        return batch
+    except Exception:
+        await db.rollback()
+        raise

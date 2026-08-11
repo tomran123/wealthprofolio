@@ -1,14 +1,20 @@
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum as SAEnum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import AssetClass, MarketRegion, PriceSourceType
 
+if TYPE_CHECKING:
+    from app.models.exposure_group import ExposureGroup
+    from app.models.holding import Holding
+    from app.models.transaction import Transaction
 
-class Instrument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+
+class Instrument(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """A unified asset product (a stock, ETF, fund, cash currency, real estate, etc.)
     that can be held across many accounts. This is the entity cross-account aggregation
     groups by."""
@@ -40,3 +46,4 @@ class Instrument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     exposure_group: Mapped["ExposureGroup | None"] = relationship("ExposureGroup", back_populates="instruments")
     holdings: Mapped[list["Holding"]] = relationship("Holding", back_populates="instrument")
+    transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="instrument")

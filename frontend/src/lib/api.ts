@@ -1,4 +1,28 @@
 const JSON_METHODS = new Set(["POST", "PUT", "PATCH"]);
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const CSRF_COOKIE_NAME = "wp_csrf";
+
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") {
+    return null;
+  }
+
+  const prefix = `${encodeURIComponent(name)}=`;
+  const entry = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
+
+  if (!entry) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(entry.slice(prefix.length));
+  } catch {
+    return entry.slice(prefix.length);
+  }
+}
 
 export class ApiError extends Error {
   status: number;
@@ -13,11 +37,15 @@ export class ApiError extends Error {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method ?? "GET").toUpperCase();
   const isFormData = options.body instanceof FormData;
+  const csrfToken = UNSAFE_METHODS.has(method)
+    ? readCookie(CSRF_COOKIE_NAME)
+    : null;
 
   const res = await fetch(path, {
     ...options,
     headers: {
       ...(JSON_METHODS.has(method) && !isFormData ? { "Content-Type": "application/json" } : {}),
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       ...(options.headers ?? {}),
     },
     credentials: "include",
@@ -53,3 +81,8 @@ export const api = {
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
+
+export function csrfHeaders(): Record<string, string> {
+  const token = readCookie(CSRF_COOKIE_NAME);
+  return token ? { "X-CSRF-Token": token } : {};
+}

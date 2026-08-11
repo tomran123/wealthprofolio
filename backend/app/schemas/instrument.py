@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import AssetClass, MarketRegion, PriceSourceType
 
@@ -36,6 +36,23 @@ class InstrumentUpdate(BaseModel):
 class InstrumentRead(InstrumentBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+
+
+class MarketInstrumentSearchItem(BaseModel):
+    selection_token: str
+    symbol: str
+    name: str
+    asset_class: AssetClass
+    currency: str
+    market: MarketRegion
+    exchange: str | None = None
+    source: str
+    is_local: bool = False
+
+
+class MarketInstrumentSearchResponse(BaseModel):
+    items: list[MarketInstrumentSearchItem] = Field(default_factory=list)
+    unavailable_sources: list[str] = Field(default_factory=list)
 
 
 class ManualValuationCreate(BaseModel):

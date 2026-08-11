@@ -2,6 +2,15 @@
 
 > Phase 1 (基础数据库 + 跨账户聚合) 已完成。本文档描述后续四个阶段的详细实施计划，作为开发路线图和上下文参考。
 
+## 实施状态（2026-07-21）
+
+- [x] Phase 2：行情适配器、并发刷新、FX 刷新、估值快照、Dashboard 历史曲线与报价状态
+- [x] Phase 3：可逆交易账本、持仓/现金原子更新、筛选与交易管理页面
+- [x] Phase 4：加密 LLM 配置、Chat/Vision 分离、文件识别、工具调度、会话与操作审计
+- [x] Phase 5：Agent 一键撤销、每日容器备份、CSV/JSON/SQL 导出与受确认保护的恢复
+
+对应数据库迁移为 `0003`–`0006`；后端 smoke test 位于 `backend/tests/integration_smoke.py`。
+
 ---
 
 ## Phase 2 — 价格刷新引擎 (Price Refresh Engine)
@@ -329,7 +338,13 @@ Vision 角色独立配置：用户可选"聊天用 DeepSeek，识图用 GPT-4o"�
 
 `backend/app/agent/tools.py`：将 Phase 1–3 服务方法包装为 OpenAI function-calling schema。
 
-**全部 22 个工具**（均调用已有服务，无裸 SQL）：
+**共 60+ 个类型化工具**（均调用已有服务，无裸 SQL）：
+
+- 查询工具立即执行：Owner / Institution / Account / Instrument / Holding / Transaction /
+  ExposureGroup / Price / FX / Settings 的 list、search、get 和历史行情查询。
+- 业务写工具覆盖上述实体的 create、update、delete，以及全部交易、估值、刷新与重算操作。
+- 每个工具带静态 `read | create | update | delete` 元数据；所有非 read 工具必须进入服务端
+  pending plan，由用户在前端点击一次确认后原子执行。
 
 ```python
 # 查询类
@@ -385,9 +400,10 @@ async def run_agent_turn(
     # 1. 如有上传文件 → 调 vision model 提取结构化数据
     # 2. 将结构化数据注入 messages 作为 tool-result 或 user message
     # 3. 调 chat model with tool_choice="auto" + tools 列表
-    # 4. 循环执行 tool_calls 直到无更多工具调用
-    # 5. 每次工具调用前后保存 AgentOperationLog（before/after diff）
-    # 6. 返回最终 assistant 文本 + tool_call_trace
+    # 4. 循环执行 read tool_calls；mutation tool_calls 只加入服务器端 pending plan
+    # 5. 返回确认清单，用户点击确认后在一个事务中执行全部依赖操作
+    # 6. 确认执行前后保存 AgentOperationLog（before/after diff）
+    # 7. 返回最终 assistant 文本 + tool_call_trace + pending_action
 ```
 
 **Vision/OCR 流水线** (调 vision model)：

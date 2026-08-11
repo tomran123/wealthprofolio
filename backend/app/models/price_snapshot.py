@@ -1,20 +1,32 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Numeric, String
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Index, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, UUIDPrimaryKeyMixin
 from app.models.enums import QuoteStatus
 
+if TYPE_CHECKING:
+    from app.models.instrument import Instrument
 
-class PriceSnapshot(UUIDPrimaryKeyMixin, Base):
+
+class PriceSnapshot(UUIDPrimaryKeyMixin, FamilyScopedMixin, Base):
     """An immutable point-in-time price observation for an Instrument (market quote,
     manual valuation, or a fixed/derived price for cash & deposits)."""
 
     __tablename__ = "price_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_price_snapshots_instrument_as_of",
+            "instrument_id",
+            "as_of",
+            "fetched_at",
+        ),
+    )
 
     instrument_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("instruments.id", ondelete="CASCADE"), nullable=False, index=True

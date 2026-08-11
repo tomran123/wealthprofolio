@@ -1,11 +1,16 @@
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Enum as SAEnum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, FamilyScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import OwnerType
 
+if TYPE_CHECKING:
+    from app.models.account import Account
 
-class Owner(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+
+class Owner(UUIDPrimaryKeyMixin, TimestampMixin, FamilyScopedMixin, Base):
     """The real-world person or entity a piece of wealth belongs to (father, mother, etc.)."""
 
     __tablename__ = "owners"
